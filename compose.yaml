@@ -1,0 +1,72 @@
+services:
+  padock:
+    build: .
+    container_name: padock
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PADOCK_HOST: 0.0.0.0
+      PADOCK_PORT: 3000
+      PADOCK_DATA_DIR: /var/lib/padock/panel
+      PADOCK_PUBLIC_URL: ${PADOCK_PUBLIC_URL:-${PANELMC_PUBLIC_URL:-http://localhost:3000}}
+      PADOCK_SFTP_PUBLIC_HOST: ${PADOCK_SFTP_PUBLIC_HOST:-${PANELMC_SFTP_PUBLIC_HOST:-localhost}}
+      PADOCK_SFTP_PUBLIC_PORT: ${PADOCK_SFTP_PUBLIC_PORT:-${PANELMC_SFTP_PUBLIC_PORT:-2022}}
+      PADOCK_JWT_SECRET: ${PADOCK_JWT_SECRET:-${PANELMC_JWT_SECRET:-}}
+      PADOCK_DEFAULT_NODE_URL: http://agent:3001
+      PADOCK_NODE_TOKEN: ${PADOCK_NODE_TOKEN:-${PANELMC_NODE_TOKEN:-}}
+      CURSEFORGE_API_KEY: ${CURSEFORGE_API_KEY:-}
+      DATABASE_URL: postgresql://panelmc:${PADOCK_DATABASE_PASSWORD:-${PANELMC_DATABASE_PASSWORD:-}}@database:5432/panelmc
+    volumes:
+      - ${PADOCK_PANEL_DATA_DIR:-${PANELMC_PANEL_DATA_DIR:-/var/lib/padock/panel}}:/var/lib/padock/panel
+    depends_on:
+      agent:
+        condition: service_started
+      database:
+        condition: service_healthy
+
+  agent:
+    build: .
+    container_name: padock-agent
+    command: ["node", "build/agent/index.js"]
+    restart: unless-stopped
+    ports:
+      - "${PADOCK_SFTP_PUBLIC_PORT:-${PANELMC_SFTP_PUBLIC_PORT:-2022}}:2022"
+    environment:
+      PADOCK_AGENT_HOST: 0.0.0.0
+      PADOCK_AGENT_PORT: 3001
+      PADOCK_SFTP_ENABLED: "true"
+      PADOCK_SFTP_HOST: 0.0.0.0
+      PADOCK_SFTP_PORT: 2022
+      PADOCK_NODE_TOKEN: ${PADOCK_NODE_TOKEN:-${PANELMC_NODE_TOKEN:-}}
+      PADOCK_SERVERS_DIR: /var/lib/padock/servers
+      PADOCK_BACKUPS_DIR: /var/lib/padock/backups
+      PADOCK_MINECRAFT_IMAGE: ${PADOCK_MINECRAFT_IMAGE:-${PANELMC_MINECRAFT_IMAGE:-itzg/minecraft-server:java25}}
+      CURSEFORGE_API_KEY: ${CURSEFORGE_API_KEY:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PADOCK_SERVERS_DIR:-${PANELMC_SERVERS_DIR:-/var/lib/padock/servers}}:/var/lib/padock/servers
+      - ${PADOCK_BACKUPS_DIR:-${PANELMC_BACKUPS_DIR:-/var/lib/padock/backups}}:/var/lib/padock/backups
+    group_add:
+      - ${DOCKER_GID:-999}
+
+  database:
+    image: postgres:17-alpine
+    container_name: padock-database
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: panelmc
+      POSTGRES_USER: panelmc
+      POSTGRES_PASSWORD: ${PADOCK_DATABASE_PASSWORD:-${PANELMC_DATABASE_PASSWORD:-}}
+    volumes:
+      - panelmc-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U panelmc -d panelmc"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  # Nom conservé pour rattacher automatiquement les installations PanelMC existantes.
+  panelmc-postgres:

@@ -1,0 +1,11 @@
+import { FormEvent, useState } from 'react';
+import { api, type UserRecord } from '../api';
+
+export function UsersView({ users, onChanged }: { users: UserRecord[]; onChanged: () => void }) {
+  const [creating, setCreating] = useState(false); const [error, setError] = useState('');
+  async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = new FormData(event.currentTarget); try { await api('/api/users', { method: 'POST', body: JSON.stringify({ username: form.get('username'), email: form.get('email'), password: form.get('password'), role: form.get('role') }) }); setCreating(false); onChanged(); } catch (err) { setError((err as Error).message); } }
+  async function remove(id: string) { if (!confirm('Supprimer cet utilisateur ?')) return; try { await api(`/api/users/${id}`, { method: 'DELETE' }); onChanged(); } catch (err) { setError((err as Error).message); } }
+  return <><div className="section-actions"><button className="primary" onClick={() => setCreating(!creating)}>＋ Nouvel utilisateur</button></div>
+    {creating && <form className="inline-form" onSubmit={submit}><h2>Créer un compte</h2>{error && <div className="alert">{error}</div>}<div className="form-row"><label>Nom<input name="username" required minLength={3} /></label><label>E-mail<input name="email" type="email" required /></label></div><div className="form-row"><label>Mot de passe<input name="password" type="password" minLength={10} required /></label><label>Rôle<select name="role"><option value="user">Utilisateur</option><option value="admin">Administrateur</option></select></label></div><button className="primary">Créer le compte</button></form>}
+    <div className="table-card"><table><thead><tr><th>UTILISATEUR</th><th>E-MAIL</th><th>RÔLE</th><th>CRÉÉ LE</th><th /></tr></thead><tbody>{users.map((user) => <tr key={user.id}><td><span className="user-avatar">{user.username[0]?.toUpperCase()}</span><strong>{user.username}</strong></td><td>{user.email}</td><td><span className={`role-badge ${user.role}`}>{user.role}</span></td><td>{new Date(user.createdAt).toLocaleDateString('fr-FR')}</td><td><button className="table-action" onClick={() => remove(user.id)}>Supprimer</button></td></tr>)}</tbody></table></div></>;
+}

@@ -1,0 +1,44 @@
+{
+  "name": "padock",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n PANEL,AGENT,WEB -c cyan,magenta,green \"tsx watch src/server/index.ts\" \"tsx watch src/agent/index.ts\" \"vite\"",
+    "dev:panel": "tsx watch src/server/index.ts",
+    "dev:agent": "tsx watch src/agent/index.ts",
+    "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.agent.json && vite build",
+    "start": "node build/server/index.js",
+    "start:agent": "node build/agent/index.js",
+    "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.agent.json && tsc --noEmit -p tsconfig.web.json"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/jwt": "^10.0.0",
+    "@fastify/rate-limit": "^11.1.0",
+    "@fastify/static": "^10.1.0",
+    "dockerode": "^5.0.1",
+    "fastify": "^5.6.2",
+    "pg": "^8.22.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1",
+    "ssh2": "^1.17.0",
+    "tar": "^7.5.20",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^3.3.44",
+    "@types/node": "^24.10.1",
+    "@types/pg": "^8.20.0",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@types/ssh2": "^1.15.5",
+    "@vitejs/plugin-react": "^5.1.1",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.2"
+  }
+}

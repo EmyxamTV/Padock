@@ -1,0 +1,102 @@
+services:
+  padock:
+    build: .
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      NODE_ENV: production
+      PADOCK_HOST: 0.0.0.0
+      PADOCK_PORT: 3000
+      PADOCK_DATA_DIR: /var/lib/padock/panel
+      PADOCK_PUBLIC_URL: ${PADOCK_PUBLIC_URL:-${PANELMC_PUBLIC_URL:-}}
+      PADOCK_SFTP_PUBLIC_HOST: ${PADOCK_SFTP_PUBLIC_HOST:-${PANELMC_SFTP_PUBLIC_HOST:-}}
+      PADOCK_SFTP_PUBLIC_PORT: ${PADOCK_SFTP_PUBLIC_PORT:-${PANELMC_SFTP_PUBLIC_PORT:-2022}}
+      PADOCK_JWT_SECRET: ${PADOCK_JWT_SECRET:-${PANELMC_JWT_SECRET:-}}
+      PADOCK_DEFAULT_NODE_URL: http://agent:3001
+      PADOCK_NODE_TOKEN: ${PADOCK_NODE_TOKEN:-${PANELMC_NODE_TOKEN:-}}
+      PADOCK_GATEWAY_ENABLED: "true"
+      PADOCK_GATEWAY_DOMAIN: ${PADOCK_GATEWAY_DOMAIN:-${PANELMC_GATEWAY_DOMAIN:-}}
+      PADOCK_GATEWAY_DNS_TARGET: ${PADOCK_GATEWAY_DNS_TARGET:-${PANELMC_GATEWAY_DNS_TARGET:-}}
+      PADOCK_GATEWAY_PORT: 25565
+      PADOCK_GATEWAY_BACKEND_HOST: 127.0.0.1
+      PADOCK_GATEWAY_DIR: /var/lib/padock/gateway
+      PADOCK_GATEWAY_CONFIG: /var/lib/padock/gateway/config.yml
+      CURSEFORGE_API_KEY: ${CURSEFORGE_API_KEY:-}
+      DATABASE_URL: postgresql://panelmc:${PADOCK_DATABASE_PASSWORD:-${PANELMC_DATABASE_PASSWORD:-}}@database:5432/panelmc
+    volumes:
+      - panelmc-panel:/var/lib/padock/panel
+      - panelmc-gateway:/var/lib/padock/gateway
+    depends_on:
+      agent:
+        condition: service_started
+      database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  agent:
+    build: .
+    command: ["node", "build/agent/index.js"]
+    restart: unless-stopped
+    expose:
+      - "3001"
+    ports:
+      - "${PADOCK_SFTP_PUBLIC_PORT:-${PANELMC_SFTP_PUBLIC_PORT:-2022}}:2022"
+    environment:
+      NODE_ENV: production
+      PADOCK_AGENT_HOST: 0.0.0.0
+      PADOCK_AGENT_PORT: 3001
+      PADOCK_SFTP_ENABLED: "true"
+      PADOCK_SFTP_HOST: 0.0.0.0
+      PADOCK_SFTP_PORT: 2022
+      PADOCK_NODE_TOKEN: ${PADOCK_NODE_TOKEN:-${PANELMC_NODE_TOKEN:-}}
+      PADOCK_SERVERS_DIR: /var/lib/padock/servers
+      PADOCK_BACKUPS_DIR: /var/lib/padock/backups
+      PADOCK_MINECRAFT_IMAGE: ${PADOCK_MINECRAFT_IMAGE:-${PANELMC_MINECRAFT_IMAGE:-itzg/minecraft-server:java25}}
+      PADOCK_GATEWAY_ENABLED: "true"
+      PADOCK_GATEWAY_PORT: 25565
+      PADOCK_GATEWAY_BACKEND_BIND: 127.0.0.1
+      CURSEFORGE_API_KEY: ${CURSEFORGE_API_KEY:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PADOCK_SERVERS_DIR:-${PANELMC_SERVERS_DIR:-/var/lib/padock/servers}}:/var/lib/padock/servers
+      - ${PADOCK_BACKUPS_DIR:-${PANELMC_BACKUPS_DIR:-/var/lib/padock/backups}}:/var/lib/padock/backups
+    group_add:
+      - ${DOCKER_GID:-999}
+
+  gate:
+    image: ghcr.io/minekube/gate:v0.65.0
+    command: ["--config", "/gateway/config.yml"]
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - panelmc-gateway:/gateway:ro
+    depends_on:
+      padock:
+        condition: service_healthy
+
+  database:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: panelmc
+      POSTGRES_USER: panelmc
+      POSTGRES_PASSWORD: ${PADOCK_DATABASE_PASSWORD:-${PANELMC_DATABASE_PASSWORD:-}}
+    volumes:
+      - panelmc-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U panelmc -d panelmc"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  # Noms conservés pour rattacher automatiquement les installations PanelMC existantes.
+  panelmc-panel:
+  panelmc-gateway:
+  panelmc-postgres:
