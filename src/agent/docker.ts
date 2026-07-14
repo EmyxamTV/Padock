@@ -19,10 +19,13 @@ export interface ServerState {
   error?: string;
 }
 
+export interface NetworkCounterSample { rxBytes: number; txBytes: number; measuredAt: number }
+
 export class NodeDocker {
   readonly docker = new Docker({ socketPath: process.env.DOCKER_SOCKET ?? (process.platform === 'win32' ? '//./pipe/docker_engine' : '/var/run/docker.sock') });
   private imageReady?: Promise<void>;
   private readonly diskUsageCache = new Map<string, { bytes: number; expiresAt: number }>();
+  private readonly networkCounters = new Map<string, NetworkCounterSample>();
 
   constructor(private dataDir: string) {}
 
@@ -32,12 +35,11 @@ export class NodeDocker {
 
   async create(input: { id: string; name: string; software: string; version: string; memoryMb: number; cpuPercent: number; diskMb: number; port: number }, serverPack?: { relativePath: string; projectId: number; fileId: number; filename: string }) {
     const serverDir = path.join(this.dataDir, input.id);
-    const javaMemoryMb = Math.max(768, Math.floor(input.memoryMb * 0.8));
     const genericPack = serverPack ? containerPackPath(serverPack.relativePath) : undefined;
     await mkdir(serverDir, { recursive: true });
     await this.ensureImage();
     const env = [
-      'EULA=TRUE', `TYPE=${input.software}`, `VERSION=${input.version}`, `MEMORY=${javaMemoryMb}M`,
+      'EULA=TRUE', `TYPE=${input.software}`, `VERSION=${input.version}`, ...javaMemoryEnvironment(input.memoryMb),
       'ENABLE_RCON=true', 'ONLINE_MODE=true', 'USE_AIKAR_FLAGS=true',
     ];
     if (genericPack) env.push(`GENERIC_PACK=${genericPack}`, 'USE_MODPACK_START_SCRIPT=true');
@@ -109,6 +111,7 @@ export class NodeDocker {
   async remove(id: string) {
     try { await (await this.container(id)).remove({ force: true }); }
     catch (error) { if ((error as { statusCode?: number }).statusCode !== 404) throw error; }
+    this.networkCounters.delete(id);
   }
 
   async updateResources(id: string, input: { memoryMb: number; cpuPercent: number; diskMb: number }) {
@@ -121,7 +124,7 @@ export class NodeDocker {
     const info = await container.inspect();
     const originalEnv = info.Config.Env ?? [];
     const env = originalEnv.filter((entry) => !['MEMORY=', 'INIT_MEMORY=', 'MAX_MEMORY='].some((prefix) => entry.startsWith(prefix)))
-      .concat(`MEMORY=${Math.max(768, Math.floor(input.memoryMb * 0.8))}M`);
+      .concat(javaMemoryEnvironment(input.memoryMb));
     const labels: Record<string, string> = {
       ...info.Config.Labels,
       'padock.memory-mb': String(input.memoryMb),
@@ -157,7 +160,7 @@ export class NodeDocker {
     const env = originalEnv.filter((entry) => !['TYPE=', 'VERSION=', 'MEMORY=', 'INIT_MEMORY=', 'MAX_MEMORY='].some((prefix) => entry.startsWith(prefix))).concat([
       `TYPE=${input.software}`,
       `VERSION=${input.version}`,
-      `MEMORY=${Math.max(768, Math.floor(input.memoryMb * 0.8))}M`,
+      ...javaMemoryEnvironment(input.memoryMb),
     ]);
     const labels: Record<string, string> = {
       ...info.Config.Labels,
@@ -184,7 +187,7 @@ export class NodeDocker {
     if (input.memoryMb) managedPrefixes.push('MEMORY=', 'INIT_MEMORY=', 'MAX_MEMORY=');
     const env = originalEnv.filter((entry) => !managedPrefixes.some((prefix) => entry.startsWith(prefix))).concat([
       `TYPE=${input.software}`, `VERSION=${input.version}`, `GENERIC_PACK=${genericPack}`, 'USE_MODPACK_START_SCRIPT=true',
-      ...(input.memoryMb ? [`MEMORY=${Math.max(768, Math.floor(input.memoryMb * 0.8))}M`] : []),
+      ...(input.memoryMb ? javaMemoryEnvironment(input.memoryMb) : []),
     ]);
     const labels: Record<string, string> = { ...info.Config.Labels, 'padock.modpack-provider': 'curseforge', 'padock.modpack-mode': 'server-pack', 'padock.modpack-project-id': String(input.projectId), 'padock.modpack-file-id': String(input.fileId), 'padock.modpack-filename': input.filename };
     if (input.memoryMb) labels['padock.memory-mb'] = String(input.memoryMb);
@@ -222,12 +225,19 @@ export class NodeDocker {
     const cache = value.memory_stats.stats?.inactive_file ?? value.memory_stats.stats?.cache ?? 0;
     const memoryBytes = Math.max(0, (value.memory_stats.usage ?? 0) - cache);
     const networks = Object.values(value.networks ?? {});
+    const currentNetwork: NetworkCounterSample = {
+      rxBytes: networks.reduce((total, item) => total + item.rx_bytes, 0),
+      txBytes: networks.reduce((total, item) => total + item.tx_bytes, 0),
+      measuredAt: Date.now(),
+    };
+    const networkRates = calculateNetworkRates(currentNetwork, this.networkCounters.get(id));
+    this.networkCounters.set(id, currentNetwork);
     return {
       cpuPercent: Math.round(cpuPercent * 100) / 100,
       memoryBytes,
       memoryLimitBytes: value.memory_stats.limit ?? 0,
-      networkRxBytes: networks.reduce((total, item) => total + item.rx_bytes, 0),
-      networkTxBytes: networks.reduce((total, item) => total + item.tx_bytes, 0),
+      networkRxBytes: networkRates.rxBytesPerSecond,
+      networkTxBytes: networkRates.txBytesPerSecond,
     };
   }
 
@@ -299,6 +309,23 @@ export class NodeDocker {
       await new Promise<void>((resolve, reject) => this.docker.modem.followProgress(stream, (err) => err ? reject(err) : resolve()));
     }
   }
+}
+
+export function javaMemoryEnvironment(containerMemoryMb: number) {
+  const maximumMb = Math.max(768, Math.floor(containerMemoryMb * 0.8));
+  const initialMb = Math.min(maximumMb, Math.max(512, Math.min(2048, Math.floor(maximumMb * 0.25))));
+  return [`INIT_MEMORY=${initialMb}M`, `MAX_MEMORY=${maximumMb}M`];
+}
+
+export function calculateNetworkRates(current: NetworkCounterSample, previous?: NetworkCounterSample) {
+  if (!previous || current.measuredAt <= previous.measuredAt || current.rxBytes < previous.rxBytes || current.txBytes < previous.txBytes) {
+    return { rxBytesPerSecond: 0, txBytesPerSecond: 0 };
+  }
+  const elapsedSeconds = (current.measuredAt - previous.measuredAt) / 1000;
+  return {
+    rxBytesPerSecond: Math.round((current.rxBytes - previous.rxBytes) / elapsedSeconds),
+    txBytesPerSecond: Math.round((current.txBytes - previous.txBytes) / elapsedSeconds),
+  };
 }
 
 function containerPackPath(relativePath: string) {
