@@ -136,6 +136,10 @@ export class NodeDocker {
     }
   }
 
+  async updateCrashPolicy(id: string, input: { enabled: boolean; maxRestarts: number }) {
+    await (await this.container(id)).update({ RestartPolicy: input.enabled ? { Name: 'on-failure', MaximumRetryCount: input.maxRestarts } : { Name: 'no', MaximumRetryCount: 0 } });
+  }
+
   async repair(input: { id: string; name: string; software: string; version: string; memoryMb: number; cpuPercent: number; diskMb: number; port: number }) {
     const current = await this.state(input.id);
     if (current.status === 'running' || current.status === 'starting') {

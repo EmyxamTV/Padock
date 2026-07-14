@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { chown, lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chown, cp, lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import * as tar from 'tar';
 
@@ -142,7 +142,7 @@ export class ServerFiles {
     const destination = path.join(directory, id);
     await tar.c({ gzip: true, cwd: source, file: destination, portable: true }, ['.']);
     const info = await stat(destination);
-    return { id, name: id, size: info.size, createdAt: info.mtime.toISOString() };
+    return { id, name: id, size: info.size, checksum: await sha256File(destination), createdAt: info.mtime.toISOString() };
   }
 
   async restoreBackup(serverId: string, backupId: string) {
@@ -153,6 +153,40 @@ export class ServerFiles {
   async deleteBackup(serverId: string, backupId: string) {
     await rm(this.backupTarget(serverId, backupId), { force: false });
   }
+
+  async pruneBackups(serverId: string, retention: number) {
+    const items = (await this.listBackups(serverId)).sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+    for (const item of items.slice(Math.max(0, retention))) await this.deleteBackup(serverId, item.id);
+    return { deleted: Math.max(0, items.length - Math.max(0, retention)) };
+  }
+
+  async openBackup(serverId: string, backupId: string) {
+    const target = this.backupTarget(serverId, backupId); const info = await stat(target);
+    return { stream: createReadStream(target), size: info.size, checksum: await sha256File(target), name: path.basename(target) };
+  }
+
+  async writeBackupStream(serverId: string, backupId: string, input: AsyncIterable<Uint8Array>, expectedHash: string, maximumSize = 16 * 1024 * 1024 * 1024) {
+    if (!/^[a-f0-9]{64}$/i.test(expectedHash)) throw httpError(400, 'Empreinte de sauvegarde invalide.');
+    const destination = this.backupTarget(serverId, backupId); const temporary = `${destination}.upload`;
+    await mkdir(path.dirname(destination), { recursive: true }); await rm(temporary, { force: true });
+    const output = await open(temporary, 'wx'); const hash = createHash('sha256'); let size = 0;
+    try {
+      for await (const value of input) { const chunk = Buffer.from(value); size += chunk.length; if (size > maximumSize) throw httpError(413, 'La sauvegarde dépasse la taille autorisée.'); hash.update(chunk); await output.write(chunk); }
+    } catch (error) { await output.close(); await rm(temporary, { force: true }); throw error; }
+    await output.close();
+    if (hash.digest('hex').toLowerCase() !== expectedHash.toLowerCase()) { await rm(temporary, { force: true }); throw httpError(400, 'La sauvegarde transférée est corrompue.'); }
+    await rm(destination, { force: true }); await rename(temporary, destination);
+    return { id: backupId, name: backupId, size, checksum: expectedHash.toLowerCase(), createdAt: new Date().toISOString() };
+  }
+
+  async cloneServer(sourceId: string, destinationId: string) {
+    const source = this.target(sourceId, ''); const destination = this.target(destinationId, '');
+    await mkdir(destination, { recursive: true });
+    await cp(source, destination, { recursive: true, force: true, filter: (item) => !item.includes(`${path.sep}.padock${path.sep}server-packs${path.sep}`) || item.endsWith('.zip') });
+    await this.applyOwnership(destinationId, destination);
+  }
+
+  async deleteServerData(serverId: string) { await rm(this.target(serverId, ''), { recursive: true, force: true }); }
 
   private target(serverId: string, relative: string) {
     if (!/^[a-f0-9]{8}$/.test(serverId)) throw httpError(400, 'Identifiant de serveur invalide.');
@@ -250,6 +284,8 @@ async function fileMatchesHash(file: string, expectedHash: string, algorithm: 's
     throw error;
   }
 }
+
+async function sha256File(file: string) { const hash = createHash('sha256'); for await (const chunk of createReadStream(file)) hash.update(chunk); return hash.digest('hex'); }
 
 function httpError(statusCode: number, message: string) { return Object.assign(new Error(message), { statusCode }); }
 function allowedCurseForgeHost(hostname: string) { return hostname === 'media.forgecdn.net' || hostname === 'mediafilez.forgecdn.net' || hostname === 'edge.forgecdn.net' || hostname.endsWith('.forgecdn.net'); }

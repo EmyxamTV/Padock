@@ -1,21 +1,26 @@
-import { FormEvent, KeyboardEvent, useState } from 'react';
-import { api, type CurseForgeProject, type GatewayStatus, type NodeRecord, type Server, type UserRecord } from '../api';
+import { FormEvent, KeyboardEvent, useEffect, useState } from 'react';
+import { api, type CurseForgeProject, type GatewayStatus, type NetworkAllocation, type NodeRecord, type Server, type ServerTemplate } from '../api';
 
 type Software = Server['software'];
 const moddedSoftware: Software[] = ['FABRIC', 'FORGE', 'NEOFORGE'];
 
-export function CreateServer({ gateway, servers, nodes, users, busy, submitError, onClose, onSubmit }: { gateway: GatewayStatus; servers: Server[]; nodes: NodeRecord[]; users: UserRecord[]; busy: boolean; submitError?: string; onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
+export function CreateServer({ gateway, servers, nodes, users, busy, submitError, onClose, onSubmit }: { gateway: GatewayStatus; servers: Server[]; nodes: NodeRecord[]; users: Array<{ id: string; username: string; email?: string }>; busy: boolean; submitError?: string; onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
   const gatewayReady = gateway.enabled && gateway.configured && Boolean(gateway.baseDomain);
-  const nextPort = servers.length ? Math.max(...servers.map((server) => server.port)) + 1 : gatewayReady ? gateway.publicPort + 1 : 25565;
   const [name, setName] = useState('');
   const [publishDomain, setPublishDomain] = useState(gatewayReady);
   const [subdomain, setSubdomain] = useState('');
   const [subdomainEdited, setSubdomainEdited] = useState(false);
   const [software, setSoftware] = useState<Software>('PAPER');
   const [version, setVersion] = useState('LATEST');
-  const [nodeId, setNodeId] = useState(nodes.find((node) => node.online)?.id ?? nodes[0]?.id ?? '');
+  const [nodeId, setNodeId] = useState(nodes.find((node) => node.online && !node.maintenance)?.id ?? nodes.find((node) => !node.maintenance)?.id ?? '');
+  const [allocations, setAllocations] = useState<NetworkAllocation[]>([]);
+  const [allocationId, setAllocationId] = useState('');
+  const [allocationsLoading, setAllocationsLoading] = useState(false);
+  const [allocationError, setAllocationError] = useState('');
   const [memoryMb, setMemoryMb] = useState(4096);
+  const [cpuPercent, setCpuPercent] = useState(100);
   const [diskMb, setDiskMb] = useState(10240);
+  const [templates, setTemplates] = useState<ServerTemplate[]>([]);
   const [withModpack, setWithModpack] = useState(false);
   const [query, setQuery] = useState('');
   const [projects, setProjects] = useState<CurseForgeProject[]>([]);
@@ -24,6 +29,24 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
   const [loading, setLoading] = useState(false);
   const [configured, setConfigured] = useState(true);
   const [catalogError, setCatalogError] = useState('');
+
+  useEffect(() => { api<ServerTemplate[]>('/api/templates').then(setTemplates).catch(() => undefined); }, []);
+
+  useEffect(() => {
+    let active = true;
+    setAllocations([]); setAllocationId(''); setAllocationError('');
+    if (!nodeId) return () => { active = false; };
+    setAllocationsLoading(true);
+    api<NetworkAllocation[]>(`/api/nodes/${nodeId}/allocations/available`)
+      .then((items) => {
+        if (!active) return;
+        setAllocations(items); setAllocationId(items[0]?.id ?? '');
+        if (!items.length) setAllocationError('Ce nœud ne possède aucune allocation réseau libre. Ajoutez des ports depuis la page Nœuds.');
+      })
+      .catch((error) => { if (active) setAllocationError((error as Error).message); })
+      .finally(() => { if (active) setAllocationsLoading(false); });
+    return () => { active = false; };
+  }, [nodeId]);
 
   function resetCatalog() { setProjects([]); setSelected(undefined); setSearched(false); setCatalogError(''); }
   function changeName(value: string) {
@@ -40,6 +63,7 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
       setDiskMb((value) => Math.max(value, 16384));
     }
   }
+  function applyTemplate(id: string) { const template = templates.find((item) => item.id === id); if (!template) return; setSoftware(template.software); setVersion(template.version); setMemoryMb(template.memoryMb); setCpuPercent(template.cpuPercent); setDiskMb(template.diskMb); setWithModpack(false); resetCatalog(); }
 
   function applyRecommendation(project = selected) {
     if (!project) return;
@@ -71,11 +95,12 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
   function submit(event: FormEvent<HTMLFormElement>) {
     if (withModpack && !selected) { event.preventDefault(); setCatalogError('Choisissez un modpack avant de créer le serveur.'); return; }
     if (publishDomain && !subdomain) { event.preventDefault(); setCatalogError('Choisissez un sous-domaine pour l’adresse de connexion.'); return; }
+    if (!allocationId) { event.preventDefault(); setAllocationError('Choisissez une allocation réseau libre avant de créer le serveur.'); return; }
     onSubmit(event);
   }
 
   const selectedNode = nodes.find((node) => node.id === nodeId);
-  const nodeMemoryMb = selectedNode?.health ? Math.floor(selectedNode.health.memory.total / 1024 / 1024) : 0;
+  const nodeMemoryMb = selectedNode?.maxMemoryMb ?? (selectedNode?.health ? Math.floor(selectedNode.health.memory.total / 1024 / 1024) : 0);
   const allocatedMemoryMb = servers.filter((server) => server.nodeId === nodeId).reduce((total, server) => total + server.memoryMb, 0);
   const exceedsNodeCapacity = Boolean(nodeMemoryMb && allocatedMemoryMb + memoryMb > nodeMemoryMb);
   const belowRecommendation = Boolean(selected && ((selected.recommendedMemoryMb ?? 0) > memoryMb || (selected.recommendedDiskMb ?? 0) > diskMb));
@@ -84,11 +109,12 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
     <form className="modal create-server-modal" onSubmit={submit}>
       <div className="modal-head"><div><p className="eyebrow">NOUVELLE INSTANCE</p><h2>Créer un serveur</h2></div><button type="button" className="close" onClick={onClose} disabled={busy}>×</button></div>
       {submitError && <div className="alert create-error" role="alert">{submitError}</div>}
+      {templates.length > 0 && <label>Modèle de configuration<select defaultValue="" onChange={(event) => applyTemplate(event.target.value)}><option value="">Configuration personnalisée</option>{templates.map((template) => <option key={template.id} value={template.id}>{template.name} — {template.software} {template.version}</option>)}</select><small>Préremplit le logiciel, la version et les ressources.</small></label>}
       <div className="form-row">
         <label>Nom du serveur<input name="name" required minLength={2} maxLength={40} placeholder="Survie entre amis" value={name} onChange={(event) => changeName(event.target.value)} autoFocus /></label>
-        <label>Nœud Linux<select name="nodeId" value={nodeId} onChange={(event) => setNodeId(event.target.value)} required>{nodes.map((node) => <option key={node.id} value={node.id} disabled={!node.online}>{node.name} — {node.location}{!node.online ? ' (hors ligne)' : ''}</option>)}</select></label>
+        <label>Nœud Linux<select name="nodeId" value={nodeId} onChange={(event) => setNodeId(event.target.value)} required>{nodes.map((node) => <option key={node.id} value={node.id} disabled={!node.online || node.maintenance}>{node.name} — {node.location}{!node.online ? ' (hors ligne)' : node.maintenance ? ' (maintenance)' : ''}</option>)}</select></label>
       </div>
-      <label>Propriétaire<select name="ownerId" required>{users.map((user) => <option key={user.id} value={user.id}>{user.username} — {user.email}</option>)}</select></label>
+      <label>Propriétaire<select name="ownerId" required>{users.map((user) => <option key={user.id} value={user.id}>{user.username}{user.email ? ` — ${user.email}` : ''}</option>)}</select></label>
 
       {gatewayReady ? <section className="gateway-create-card">
         <label className="gateway-toggle"><input type="checkbox" checked={publishDomain} onChange={(event) => setPublishDomain(event.target.checked)} /><span><strong>Créer une adresse de connexion sans port</strong><small>La passerelle acheminera les joueurs vers ce serveur via le port Minecraft standard.</small></span></label>
@@ -124,15 +150,16 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
 
       <div className="form-row">
         <label>Mémoire (Mo)<input name="memoryMb" type="number" min="1024" max="65536" step="512" value={memoryMb} onChange={(event) => setMemoryMb(Number(event.target.value))} required /></label>
-        {gatewayReady ? <label>Allocation réseau<span className="readonly-field">Automatique · port interne masqué aux joueurs</span></label> : <label>Port public<input name="port" type="number" min="1024" max="65535" defaultValue={nextPort} required /></label>}
+        <label>{gatewayReady ? 'Port interne' : 'Allocation réseau'}<select name="allocationId" value={allocationId} onChange={(event) => setAllocationId(event.target.value)} required disabled={allocationsLoading || !allocations.length}><option value="">{allocationsLoading ? 'Chargement des ports…' : 'Aucun port libre'}</option>{allocations.map((allocation) => <option value={allocation.id} key={allocation.id}>{allocationLabel(allocation)}</option>)}</select><small>{gatewayReady ? 'Choisi dans la plage du nœud et masqué aux joueurs par la passerelle.' : 'Seuls les ports libres configurés sur le nœud sont proposés.'}</small></label>
       </div>
+      {allocationError && <div className="modpack-warning">{allocationError}</div>}
       <div className="form-row">
-        <label>CPU (%)<input name="cpuPercent" type="number" min="10" max="1600" defaultValue="100" required /></label>
+        <label>CPU (%)<input name="cpuPercent" type="number" min="10" max="1600" value={cpuPercent} onChange={(event) => setCpuPercent(Number(event.target.value))} required /></label>
         <label>Disque (Mo)<input name="diskMb" type="number" min="1024" max="1048576" step="1024" value={diskMb} onChange={(event) => setDiskMb(Number(event.target.value))} required /></label>
       </div>
       {exceedsNodeCapacity && <div className="modpack-warning">Attention : {formatMegabytes(allocatedMemoryMb)} sont déjà alloués sur {formatMegabytes(nodeMemoryMb)}. Cette nouvelle instance dépasserait la capacité mémoire du nœud.</div>}
-      <p className="hint">{busy ? 'Téléchargement et vérification du server pack…' : withModpack ? 'Le server pack sera téléchargé maintenant. Le serveur restera arrêté jusqu’à ce que vous le démarriez.' : 'L’image Minecraft sera téléchargée lors de la première création. Le monde restera stocké sur le disque de l’hôte.'}</p>
-      <div className="modal-actions"><button type="button" className="secondary" onClick={onClose} disabled={busy}>Annuler</button><button className="primary" disabled={busy || (withModpack && !selected)}>{busy ? 'Préparation…' : withModpack ? 'Créer avec ce modpack' : 'Créer le serveur'}</button></div>
+      <p className="hint">{busy ? 'Ajout dans la file d’opérations…' : withModpack ? 'Le server pack sera installé en arrière-plan. Vous pourrez suivre sa progression dans Opérations.' : 'La création continuera en arrière-plan même si vous fermez la page.'}</p>
+      <div className="modal-actions"><button type="button" className="secondary" onClick={onClose} disabled={busy}>Annuler</button><button className="primary" disabled={busy || !allocationId || (withModpack && !selected)}>{busy ? 'Préparation…' : withModpack ? 'Créer avec ce modpack' : 'Créer le serveur'}</button></div>
     </form>
   </div>;
 }
@@ -143,6 +170,11 @@ function formatDownloads(value: number) {
 
 function formatMegabytes(value: number) {
   return value >= 1024 ? `${Math.round(value / 102.4) / 10} Go` : `${value} Mo`;
+}
+
+function allocationLabel(allocation: NetworkAllocation) {
+  const address = allocation.alias || (allocation.ip === '0.0.0.0' ? 'Toutes les interfaces' : allocation.ip);
+  return `${address}:${allocation.port}`;
 }
 
 function toSubdomain(value: string) {

@@ -1,39 +1,111 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { scrypt as nodeScrypt, timingSafeEqual } from 'node:crypto';
 import type { Stats } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import { chmod, chown, lstat, mkdir, open, readFile, readdir, rename, rmdir, stat, truncate, unlink, utimes, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import ssh2 from 'ssh2';
 import type { Attributes, SFTPWrapper } from 'ssh2';
 
 const { Server, utils } = ssh2;
+const scrypt = promisify(nodeScrypt);
 
 const STATUS = utils.sftp.STATUS_CODE;
 
 type OpenResource =
-  | { type: 'file'; file: FileHandle; target: string }
+  | { type: 'file'; file: FileHandle; target: string; writable: boolean }
   | { type: 'directory'; entries: Array<{ filename: string; longname: string; attrs: Attributes }>; offset: number };
+
+export interface AgentSftpAccount {
+  id: string;
+  serverId: string;
+  username: string;
+  passwordHash: string;
+  salt: string;
+  paths: string[];
+  readOnly: boolean;
+  enabled: boolean;
+}
+
+interface SftpAccessPolicy { paths: string[]; readOnly: boolean }
+
+export class SftpAccountRegistry {
+  private accounts = new Map<string, AgentSftpAccount>();
+  private queue: Promise<void> = Promise.resolve();
+
+  constructor(private readonly file: string) {}
+
+  async load() {
+    try {
+      const values = JSON.parse(await readFile(this.file, 'utf8')) as AgentSftpAccount[];
+      this.accounts = new Map(values.map((account) => [account.id, normalizeAccount(account)]));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      await this.save();
+    }
+  }
+
+  list(serverId?: string) {
+    return [...this.accounts.values()].filter((account) => !serverId || account.serverId === serverId).map((account) => ({ ...account, paths: [...account.paths] }));
+  }
+
+  async upsert(input: AgentSftpAccount) {
+    const account = normalizeAccount(input);
+    const duplicate = [...this.accounts.values()].find((item) => item.id !== account.id && item.username.toLowerCase() === account.username.toLowerCase());
+    if (duplicate) throw new Error('Ce nom d’utilisateur SFTP est déjà utilisé sur ce nœud.');
+    this.accounts.set(account.id, account);
+    await this.save();
+    return { ...account, paths: [...account.paths] };
+  }
+
+  async remove(id: string) {
+    this.accounts.delete(id);
+    await this.save();
+  }
+
+  async removeServer(serverId: string) {
+    for (const [id, account] of this.accounts) if (account.serverId === serverId) this.accounts.delete(id);
+    await this.save();
+  }
+
+  async authenticate(username: string, password: string) {
+    const account = [...this.accounts.values()].find((item) => item.enabled && item.username.toLowerCase() === username.toLowerCase());
+    if (!account || !(await verifyPassword(password, account.salt, account.passwordHash))) return undefined;
+    return { ...account, paths: [...account.paths] };
+  }
+
+  private async save() {
+    this.queue = this.queue.catch(() => undefined).then(async () => {
+      await mkdir(path.dirname(this.file), { recursive: true });
+      const temporary = `${this.file}.tmp`;
+      await writeFile(temporary, JSON.stringify([...this.accounts.values()], null, 2), { mode: 0o600 });
+      await rename(temporary, this.file);
+    });
+    return this.queue;
+  }
+}
 
 export async function startSftpServer(options: {
   host: string;
   port: number;
   serversDir: string;
-  secret: string;
+  accounts: SftpAccountRegistry;
   hostKeyPath: string;
   log: (message: string) => void;
 }) {
   const hostKey = await loadOrCreateHostKey(options.hostKeyPath);
-  const server = new Server({ hostKeys: [hostKey], ident: 'SSH-2.0-Padock_SFTP_1.0.0' }, (client, info) => {
-    let serverId = '';
+  const server = new Server({ hostKeys: [hostKey], ident: 'SSH-2.0-Padock_SFTP_1.1.0' }, (client, info) => {
+    let account: AgentSftpAccount | undefined;
 
     client.on('authentication', (context) => {
-      if (context.method !== 'password' || !validCredential(context.username, context.password, options.secret)) {
+      if (context.method !== 'password') {
         context.reject(['password']); return;
       }
-      const requestedServer = context.username;
-      void stat(path.join(options.serversDir, requestedServer)).then((info) => {
+      void options.accounts.authenticate(context.username, context.password).then(async (authenticated) => {
+        if (!authenticated) return context.reject(['password']);
+        const info = await stat(path.join(options.serversDir, authenticated.serverId));
         if (!info.isDirectory()) return context.reject(['password']);
-        serverId = requestedServer;
+        account = authenticated;
         context.accept();
       }).catch(() => context.reject(['password']));
     });
@@ -41,7 +113,10 @@ export async function startSftpServer(options: {
     client.on('ready', () => {
       client.on('session', (accept) => {
         const session = accept();
-        session.on('sftp', (acceptSftp) => serveSftp(acceptSftp(), path.resolve(options.serversDir, serverId)));
+        session.on('sftp', (acceptSftp) => {
+          if (!account) return;
+          serveSftp(acceptSftp(), path.resolve(options.serversDir, account.serverId), { paths: account.paths, readOnly: account.readOnly });
+        });
       });
     });
     client.on('error', () => undefined);
@@ -56,7 +131,7 @@ export async function startSftpServer(options: {
   return server;
 }
 
-function serveSftp(sftp: SFTPWrapper, base: string) {
+function serveSftp(sftp: SFTPWrapper, base: string, access: SftpAccessPolicy) {
   const resources = new Map<number, OpenResource>();
   let nextHandle = 1;
   const respond = (requestId: number, task: () => Promise<void>) => {
@@ -68,6 +143,7 @@ function serveSftp(sftp: SFTPWrapper, base: string) {
 
   sftp.on('REALPATH', (requestId, requestedPath) => respond(requestId, async () => {
     const target = resolveTarget(base, requestedPath);
+    assertReadAccess(base, target, access);
     await assertNoSymlink(base, target);
     const info = await stat(target);
     const filename = remotePath(base, target);
@@ -76,6 +152,7 @@ function serveSftp(sftp: SFTPWrapper, base: string) {
 
   const sendStat = (requestId: number, requestedPath: string) => respond(requestId, async () => {
     const target = resolveTarget(base, requestedPath);
+    assertReadAccess(base, target, access);
     await assertNoSymlink(base, target);
     sftp.attrs(requestId, attributes(await stat(target)));
   });
@@ -84,9 +161,10 @@ function serveSftp(sftp: SFTPWrapper, base: string) {
 
   sftp.on('OPENDIR', (requestId, requestedPath) => respond(requestId, async () => {
     const target = resolveTarget(base, requestedPath);
+    assertReadAccess(base, target, access);
     await assertNoSymlink(base, target);
     const entries = await Promise.all((await readdir(target, { withFileTypes: true }))
-      .filter((entry) => !entry.isSymbolicLink())
+      .filter((entry) => !entry.isSymbolicLink() && hasReadAccess(base, path.join(target, entry.name), access))
       .map(async (entry) => {
         const info = await stat(path.join(target, entry.name));
         return { filename: entry.name, longname: longName(entry.name, info), attrs: attributes(info) };
@@ -107,13 +185,16 @@ function serveSftp(sftp: SFTPWrapper, base: string) {
 
   sftp.on('OPEN', (requestId, filename, flags, attrs) => respond(requestId, async () => {
     const target = resolveTarget(base, filename);
-    await assertNoSymlink(base, target, true);
-    await mkdir(path.dirname(target), { recursive: true });
     const mode = utils.sftp.flagsToString(flags);
     if (!mode) throw sftpError(STATUS.BAD_MESSAGE, 'Mode d’ouverture invalide.');
+    const writable = /[wa+]/.test(mode);
+    if (writable) assertWriteAccess(base, target, access);
+    else assertReadAccess(base, target, access);
+    await assertNoSymlink(base, target, true);
+    if (writable) await mkdir(path.dirname(target), { recursive: true });
     const file = await open(target, mode, attrs.mode ? attrs.mode & 0o777 : 0o664);
     const handleId = nextHandle++;
-    resources.set(handleId, { type: 'file', file, target });
+    resources.set(handleId, { type: 'file', file, target, writable });
     sftp.handle(requestId, encodeHandle(handleId));
   }));
 
@@ -128,7 +209,7 @@ function serveSftp(sftp: SFTPWrapper, base: string) {
 
   sftp.on('WRITE', (requestId, rawHandle, offset, data) => respond(requestId, async () => {
     const resource = resources.get(decodeHandle(rawHandle));
-    if (!resource || resource.type !== 'file') throw sftpError(STATUS.FAILURE, 'Fichier non ouvert.');
+    if (!resource || resource.type !== 'file' || !resource.writable) throw sftpError(STATUS.PERMISSION_DENIED, 'Fichier ouvert en lecture seule.');
     await resource.file.write(data, 0, data.length, offset);
     sftp.status(requestId, STATUS.OK);
   }));
@@ -141,7 +222,7 @@ function serveSftp(sftp: SFTPWrapper, base: string) {
 
   sftp.on('FSETSTAT', (requestId, rawHandle, attrs) => respond(requestId, async () => {
     const resource = resources.get(decodeHandle(rawHandle));
-    if (!resource || resource.type !== 'file') throw sftpError(STATUS.FAILURE, 'Fichier non ouvert.');
+    if (!resource || resource.type !== 'file' || !resource.writable) throw sftpError(STATUS.PERMISSION_DENIED, 'Fichier ouvert en lecture seule.');
     if (attrs.size !== undefined) await resource.file.truncate(attrs.size);
     if (attrs.mode !== undefined) await resource.file.chmod(attrs.mode & 0o777);
     if (attrs.atime !== undefined || attrs.mtime !== undefined) {
@@ -156,12 +237,13 @@ function serveSftp(sftp: SFTPWrapper, base: string) {
     const resource = resources.get(id);
     if (!resource) throw sftpError(STATUS.FAILURE, 'Ressource non ouverte.');
     resources.delete(id);
-    if (resource.type === 'file') { await resource.file.close(); await applyOwner(base, resource.target); }
+    if (resource.type === 'file') { await resource.file.close(); if (resource.writable) await applyOwner(base, resource.target); }
     sftp.status(requestId, STATUS.OK);
   }));
 
   sftp.on('MKDIR', (requestId, requestedPath, attrs) => respond(requestId, async () => {
     const target = resolveTarget(base, requestedPath);
+    assertWriteAccess(base, target, access, true);
     await assertNoSymlink(base, target, true);
     await mkdir(target, { mode: attrs.mode ? attrs.mode & 0o777 : 0o775 });
     await applyOwner(base, target);
@@ -170,6 +252,7 @@ function serveSftp(sftp: SFTPWrapper, base: string) {
 
   sftp.on('REMOVE', (requestId, requestedPath) => respond(requestId, async () => {
     const target = resolveTarget(base, requestedPath, false);
+    assertWriteAccess(base, target, access, true);
     await assertNoSymlink(base, target);
     await unlink(target);
     sftp.status(requestId, STATUS.OK);
@@ -177,6 +260,7 @@ function serveSftp(sftp: SFTPWrapper, base: string) {
 
   sftp.on('RMDIR', (requestId, requestedPath) => respond(requestId, async () => {
     const target = resolveTarget(base, requestedPath, false);
+    assertWriteAccess(base, target, access, true);
     await assertNoSymlink(base, target);
     await rmdir(target);
     sftp.status(requestId, STATUS.OK);
@@ -185,6 +269,8 @@ function serveSftp(sftp: SFTPWrapper, base: string) {
   sftp.on('RENAME', (requestId, oldPath, newPath) => respond(requestId, async () => {
     const source = resolveTarget(base, oldPath, false);
     const destination = resolveTarget(base, newPath, false);
+    assertWriteAccess(base, source, access, true);
+    assertWriteAccess(base, destination, access, true);
     await assertNoSymlink(base, source);
     await assertNoSymlink(base, destination, true);
     await rename(source, destination);
@@ -193,6 +279,7 @@ function serveSftp(sftp: SFTPWrapper, base: string) {
 
   sftp.on('SETSTAT', (requestId, requestedPath, attrs) => respond(requestId, async () => {
     const target = resolveTarget(base, requestedPath);
+    assertWriteAccess(base, target, access, true);
     await assertNoSymlink(base, target);
     if (attrs.size !== undefined) await truncate(target, attrs.size);
     if (attrs.mode !== undefined) await chmod(target, attrs.mode & 0o777);
@@ -207,7 +294,7 @@ function serveSftp(sftp: SFTPWrapper, base: string) {
   sftp.on('SYMLINK', (requestId) => sftp.status(requestId, STATUS.OP_UNSUPPORTED, 'Les liens symboliques sont désactivés.'));
   sftp.on('EXTENDED', (requestId) => sftp.status(requestId, STATUS.OP_UNSUPPORTED));
   sftp.on('close', () => {
-    for (const resource of resources.values()) if (resource.type === 'file') void resource.file.close().then(() => applyOwner(base, resource.target)).catch(() => undefined);
+    for (const resource of resources.values()) if (resource.type === 'file') void resource.file.close().then(() => resource.writable ? applyOwner(base, resource.target) : undefined).catch(() => undefined);
     resources.clear();
   });
 }
@@ -223,21 +310,6 @@ async function loadOrCreateHostKey(hostKeyPath: string) {
   }
 }
 
-function validCredential(username: string, password: string, secret: string) {
-  if (!/^[a-f0-9]{8}$/.test(username)) return false;
-  const separator = password.indexOf('.');
-  if (separator < 1) return false;
-  const expiryValue = password.slice(0, separator);
-  const signature = password.slice(separator + 1);
-  const expiry = Number(expiryValue);
-  const now = Math.floor(Date.now() / 1000);
-  if (!Number.isInteger(expiry) || expiry < now || expiry > now + 3600) return false;
-  const expected = createHmac('sha256', secret).update(`${username}:${expiry}`).digest('base64url');
-  const receivedBuffer = Buffer.from(signature);
-  const expectedBuffer = Buffer.from(expected);
-  return receivedBuffer.length === expectedBuffer.length && timingSafeEqual(receivedBuffer, expectedBuffer);
-}
-
 function resolveTarget(base: string, value: string, allowRoot = true) {
   if (value.includes('\0')) throw sftpError(STATUS.PERMISSION_DENIED, 'Chemin invalide.');
   const parts = value.replace(/\\/g, '/').split('/').filter((part) => part && part !== '.');
@@ -246,6 +318,48 @@ function resolveTarget(base: string, value: string, allowRoot = true) {
   if (target !== base && !target.startsWith(`${base}${path.sep}`)) throw sftpError(STATUS.PERMISSION_DENIED, 'Chemin hors du serveur.');
   if (!allowRoot && target === base) throw sftpError(STATUS.PERMISSION_DENIED, 'Le dossier racine est protégé.');
   return target;
+}
+
+function hasReadAccess(base: string, target: string, access: SftpAccessPolicy) {
+  const relative = relativePath(base, target);
+  if (!relative) return true;
+  return access.paths.includes('.') || access.paths.some((allowed) => relative === allowed || relative.startsWith(`${allowed}/`) || allowed.startsWith(`${relative}/`));
+}
+
+function assertReadAccess(base: string, target: string, access: SftpAccessPolicy) {
+  if (!hasReadAccess(base, target, access)) throw sftpError(STATUS.PERMISSION_DENIED, 'Ce compte n’a pas accès à ce dossier.');
+}
+
+function assertWriteAccess(base: string, target: string, access: SftpAccessPolicy, protectAllowedRoot = false) {
+  if (access.readOnly) throw sftpError(STATUS.PERMISSION_DENIED, 'Ce compte est en lecture seule.');
+  const relative = relativePath(base, target);
+  const allowed = access.paths.find((item) => item === '.' || relative === item || relative.startsWith(`${item}/`));
+  if (!relative || !allowed || (protectAllowedRoot && allowed !== '.' && relative === allowed)) {
+    throw sftpError(STATUS.PERMISSION_DENIED, 'Ce compte ne peut pas modifier ce dossier.');
+  }
+}
+
+function relativePath(base: string, target: string) {
+  return path.relative(base, target).split(path.sep).filter(Boolean).join('/');
+}
+
+function normalizeAccount(account: AgentSftpAccount): AgentSftpAccount {
+  const paths = [...new Set(account.paths.map(normalizeAllowedPath))];
+  return { ...account, username: account.username.trim().toLowerCase(), paths: paths.includes('.') ? ['.'] : paths };
+}
+
+function normalizeAllowedPath(value: string) {
+  const normalized = value.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+  if (!normalized || normalized === '.') return '.';
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.includes('.') || parts.includes('..')) throw new Error('Chemin SFTP invalide.');
+  return parts.join('/');
+}
+
+async function verifyPassword(password: string, salt: string, expectedHash: string) {
+  const actual = (await scrypt(password, salt, 64)) as Buffer;
+  const expected = Buffer.from(expectedHash, 'hex');
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
 async function assertNoSymlink(base: string, target: string, allowMissing = false) {

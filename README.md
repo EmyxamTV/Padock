@@ -6,12 +6,15 @@ Padock est un panel d'hébergement Minecraft inspiré de l'architecture de Ptero
 
 - compte administrateur et session HTTP-only ;
 - PostgreSQL avec migration automatique depuis l'ancien fichier JSON ;
-- comptes administrateur/utilisateur, propriétaires et sous-utilisateurs ;
+- comptes administrateur/utilisateur, rôles personnalisés réutilisables et permissions supplémentaires par compte ;
 - page de profil avec modification sécurisée du pseudo, de l’e-mail et du mot de passe ;
-- permissions par serveur et journal d'audit ;
+- double authentification TOTP, codes de récupération, sessions révocables, clés API, vérification e-mail et mot de passe oublié par SMTP ;
+- groupes d’utilisateurs, quotas par compte et droits serveur hérités ;
+- centre d’opérations persistant avec progression, reprise, nouvelle tentative et notifications temps réel ;
+- permissions globales granulaires, droits par serveur et journal d'audit ;
 - gestionnaire de fichiers avec éditeur intégré ;
 - upload jusqu’à 128 Mo, téléchargement et renommage de fichiers ;
-- accès SFTP isolé par serveur avec mot de passe temporaire ;
+- plusieurs comptes SFTP persistants par serveur, limitables par dossier et en lecture seule ;
 - éditeur guidé des principales propriétés Minecraft ;
 - catalogue CurseForge pour les plugins, mods et modpacks ;
 - sélection et installation directe d’un modpack pendant la création du serveur ;
@@ -28,17 +31,21 @@ Padock est un panel d'hébergement Minecraft inspiré de l'architecture de Ptero
 - arrêt forcé de secours pour les conteneurs bloqués ;
 - diagnostic des arrêts Docker, erreurs mémoire et healthchecks directement dans le panel ;
 - sauvegardes compressées, restauration et sauvegarde de sécurité ;
+- rotation automatique, empreinte SHA-256 et copie S3 compatible (MinIO, R2, B2 ou AWS) ;
 - tâches planifiées exécutables manuellement ;
 - métriques CPU, RAM et réseau en direct ;
+- historique sur 7 jours, compteur de joueurs, alertes disque, nœud hors ligne et boucles de crash ;
 - Panel et agent de nœud séparés ;
 - communication Panel-Agent authentifiée par jeton ;
 - vue des nœuds avec CPU, mémoire et état Docker ;
+- modification des nœuds, vérification des nouvelles connexions d’agent et gestion des allocations libres ;
 - création de serveurs Paper, Vanilla, Purpur, Fabric, Forge et NeoForge ;
-- choix du nœud, de la version, de la RAM et du port ;
+- choix du nœud, de la version, de la RAM et d’une allocation réseau libre appartenant à la plage configurée ;
 - allocations IP/ports et quotas mémoire, CPU et disque ;
 - démarrage, arrêt, redémarrage, console en direct et commandes RCON ;
 - monde persistant dans `/var/lib/padock/servers/<id>` ;
 - détection propre des nœuds hors ligne.
+- maintenance et capacité des nœuds, clonage, transfert inter-nœuds, mises à niveau avec rollback et modèles de création.
 
 Consultez [ARCHITECTURE.md](ARCHITECTURE.md) pour la cible fonctionnelle et les prochaines étapes.
 
@@ -52,10 +59,11 @@ cd padock
 cp .env.example .env
 ```
 
-Générez deux secrets distincts :
+Générez quatre secrets distincts :
 
 ```bash
 echo "PADOCK_JWT_SECRET=$(openssl rand -hex 48)" >> .env
+echo "PADOCK_ENCRYPTION_KEY=$(openssl rand -hex 48)" >> .env
 echo "PADOCK_NODE_TOKEN=$(openssl rand -hex 48)" >> .env
 echo "PADOCK_DATABASE_PASSWORD=$(openssl rand -hex 32)" >> .env
 echo "DOCKER_GID=$(getent group docker | cut -d: -f3)" >> .env
@@ -91,7 +99,7 @@ Un projet sans server pack ZIP est refusé proprement. Padock ne retombe pas sur
 
 ## Déploiement avec Dokploy et domaines Minecraft
 
-Utilisez `compose.dokploy.yaml` comme fichier Compose dans Dokploy et copiez les variables de `.env.dokploy.example` dans l’onglet Environment. Remplacez les trois secrets, les domaines, l’IP publique et `DOCKER_GID` avant le premier déploiement.
+Utilisez `compose.dokploy.yaml` comme fichier Compose dans Dokploy et copiez les variables de `.env.dokploy.example` dans l’onglet Environment. Remplacez les quatre secrets, les domaines, l’IP publique et `DOCKER_GID` avant le premier déploiement.
 
 Dans l’onglet **Domains** de l’application Docker Compose Dokploy, ajoutez le domaine du panel sur :
 
@@ -139,6 +147,6 @@ Services disponibles : interface `5173`, Panel `3000`, agent `3001`.
 
 ## Sécurité
 
-Seul l'agent monte `/var/run/docker.sock`. Le Panel n'a aucun accès direct à Docker. Pour un nœud distant, exposez son API uniquement en HTTPS et limitez l'accès réseau à l'adresse du Panel. Les jetons de nœuds ne sont jamais retournés à l'interface Web. Les accès SFTP sont enfermés dans le dossier du serveur et utilisent un secret signé valable 30 minutes. En mode Dokploy, Gate est le seul service de jeu exposé publiquement ; les ports des backends restent sur la boucle locale.
+Seul l'agent monte `/var/run/docker.sock`. Le Panel n'a aucun accès direct à Docker. Pour un nœud distant, exposez son API uniquement en HTTPS et limitez l'accès réseau à l'adresse du Panel. Les jetons de nœuds et secrets TOTP sont chiffrés en AES-256-GCM avec `PADOCK_ENCRYPTION_KEY` et ne sont jamais retournés à l'interface Web. Les mots de passe SFTP sont stockés sous forme d’empreinte, chaque compte reste enfermé dans le dossier de son serveur et l’agent applique sa liste de dossiers autorisés ainsi que le mode lecture seule. En mode Dokploy, Gate est le seul service de jeu exposé publiquement ; les ports des backends restent sur la boucle locale.
 
 La suppression d'une instance retire son conteneur, mais conserve volontairement le monde sur le nœud.

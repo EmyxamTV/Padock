@@ -1,5 +1,5 @@
 import { Readable } from 'node:stream';
-import type { MinecraftServer, NodeRecord, ServerSoftware } from './types.js';
+import type { MinecraftServer, NodeRecord, ServerSoftware, SftpAccount } from './types.js';
 
 export interface NodeHealth {
   ok: boolean;
@@ -11,6 +11,7 @@ export interface NodeHealth {
   sftp?: { enabled: boolean; port: number };
   curseForge?: { configured: boolean };
   gateway?: { enabled: boolean; port: number };
+  backups?: { remoteConfigured: boolean };
 }
 
 export interface ServerStats {
@@ -68,8 +69,10 @@ export class NodeClient {
 
   state(server: MinecraftServer) { return this.request<RemoteServerState>(`/v1/servers/${server.id}/status`); }
   updateResources(server: MinecraftServer, input: { memoryMb: number; cpuPercent: number; diskMb: number }) { return this.request<{ ok: true }>(`/v1/servers/${server.id}/resources`, { method: 'PUT', body: JSON.stringify(input) }, 60_000); }
+  updateCrashPolicy(server: MinecraftServer, input: { enabled: boolean; maxRestarts: number }) { return this.request<{ ok: true }>(`/v1/servers/${server.id}/crash-policy`, { method: 'PUT', body: JSON.stringify(input) }); }
 
   stats(server: MinecraftServer) { return this.request<ServerStats>(`/v1/servers/${server.id}/stats`); }
+  metrics(server: MinecraftServer) { return this.request<ServerStats & { status: RemoteServerState['status']; playersOnline?: number; playersMax?: number }>(`/v1/servers/${server.id}/metrics`, {}, 30_000); }
   files(server: MinecraftServer, relative = '') { return this.request<Array<{ name: string; path: string; type: 'file' | 'directory'; size: number; modifiedAt: string }>>(`/v1/servers/${server.id}/files?path=${encodeURIComponent(relative)}`); }
   readFile(server: MinecraftServer, relative: string) { return this.request<{ content: string }>(`/v1/servers/${server.id}/files/content?path=${encodeURIComponent(relative)}`); }
   writeFile(server: MinecraftServer, relative: string, content: string) { return this.request<{ ok: true }>(`/v1/servers/${server.id}/files/content`, { method: 'PUT', body: JSON.stringify({ path: relative, content }) }); }
@@ -83,9 +86,25 @@ export class NodeClient {
   installContent(server: MinecraftServer, input: { kind: 'plugin' | 'mod'; url: string; filename: string; hash: string; algorithm: 'sha1' | 'md5' }) { return this.request<{ name: string; path: string; size: number }>(`/v1/servers/${server.id}/content/install`, { method: 'POST', body: JSON.stringify(input) }, 30 * 60_000); }
   configureCurseForgeModpack(server: MinecraftServer, serverPack: RemoteServerPack) { return this.request<{ ok: true }>(`/v1/servers/${server.id}/content/modpack`, { method: 'POST', body: JSON.stringify({ software: server.software, version: server.version, serverPack }) }, 30 * 60_000); }
   backups(server: MinecraftServer) { return this.request<Array<{ id: string; name: string; size: number; createdAt: string }>>(`/v1/servers/${server.id}/backups`); }
-  createBackup(server: MinecraftServer, name?: string) { return this.request<{ id: string; name: string; size: number; createdAt: string }>(`/v1/servers/${server.id}/backups`, { method: 'POST', body: JSON.stringify({ name }) }, 30 * 60_000); }
+  createBackup(server: MinecraftServer, name?: string) { return this.request<{ id: string; name: string; size: number; checksum?: string; local?: boolean; remote?: boolean; createdAt: string }>(`/v1/servers/${server.id}/backups`, { method: 'POST', body: JSON.stringify({ name, remote: server.backupPolicy.remoteEnabled }) }, 30 * 60_000); }
   restoreBackup(server: MinecraftServer, backupId: string) { return this.request<{ ok: true }>(`/v1/servers/${server.id}/backups/${encodeURIComponent(backupId)}/restore`, { method: 'POST' }, 30 * 60_000); }
   deleteBackup(server: MinecraftServer, backupId: string) { return this.request<{ ok: true }>(`/v1/servers/${server.id}/backups/${encodeURIComponent(backupId)}`, { method: 'DELETE' }); }
+  pruneBackups(server: MinecraftServer, retention: number) { return this.request<{ deleted: number }>(`/v1/servers/${server.id}/backups/prune`, { method: 'POST', body: JSON.stringify({ retention }) }, 30 * 60_000); }
+  cloneData(source: MinecraftServer, destination: MinecraftServer) { return this.request<{ ok: true }>(`/v1/servers/${source.id}/clone/${destination.id}`, { method: 'POST' }, 30 * 60_000); }
+
+  async transferBackupTo(server: MinecraftServer, backupId: string, destination: NodeClient, destinationServer: MinecraftServer) {
+    const sourceResponse = await fetch(this.url(`/v1/servers/${server.id}/backups/${encodeURIComponent(backupId)}/export`), { headers: this.headers(), signal: AbortSignal.timeout(60 * 60_000) });
+    if (!sourceResponse.ok || !sourceResponse.body) throw new Error(await errorFrom(sourceResponse));
+    const checksum = sourceResponse.headers.get('x-padock-checksum'); if (!checksum) throw new Error('Le nœud source n’a pas fourni l’empreinte de la sauvegarde.');
+    const headers = new Headers(destination.headers()); headers.set('Content-Type', 'application/x-padock-backup'); headers.set('X-Padock-Checksum', checksum);
+    const length = sourceResponse.headers.get('content-length'); if (length) headers.set('Content-Length', length);
+    const response = await fetch(destination.url(`/v1/servers/${destinationServer.id}/backups/${encodeURIComponent(backupId)}/import`), { method: 'PUT', headers, body: sourceResponse.body, duplex: 'half', signal: AbortSignal.timeout(60 * 60_000) } as RequestInit & { duplex: 'half' });
+    if (!response.ok) throw new Error(await errorFrom(response));
+    return await response.json() as { id: string; name: string; size: number; checksum: string; createdAt: string };
+  }
+  syncSftpAccount(account: SftpAccount) { return this.request<{ ok: true }>(`/v1/sftp/accounts/${account.id}`, { method: 'PUT', body: JSON.stringify({ serverId: account.serverId, username: account.username, passwordHash: account.passwordHash, salt: account.salt, paths: account.paths, readOnly: account.readOnly, enabled: account.enabled }) }); }
+  deleteSftpAccount(accountId: string) { return this.request<{ ok: true }>(`/v1/sftp/accounts/${accountId}`, { method: 'DELETE' }); }
+  deleteServerSftpAccounts(server: MinecraftServer) { return this.request<{ ok: true }>(`/v1/servers/${server.id}/sftp/accounts`, { method: 'DELETE' }); }
 
   action(server: MinecraftServer, action: 'start' | 'stop' | 'restart' | 'kill') {
     return this.request<{ ok: true }>(`/v1/servers/${server.id}/${action}`, { method: 'POST' });
@@ -102,6 +121,7 @@ export class NodeClient {
   remove(server: MinecraftServer) {
     return this.request<{ ok: true }>(`/v1/servers/${server.id}`, { method: 'DELETE' });
   }
+  removeData(server: MinecraftServer) { return this.request<{ ok: true }>(`/v1/servers/${server.id}/data`, { method: 'DELETE' }, 10 * 60_000); }
 
   async logs(server: MinecraftServer, tail = 200) {
     const response = await fetch(this.url(`/v1/servers/${server.id}/logs?tail=${tail}`), { headers: this.headers() });

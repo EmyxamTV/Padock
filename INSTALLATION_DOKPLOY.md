@@ -152,9 +152,10 @@ Documentation officielle : [Docker Compose dans Dokploy](https://docs.dokploy.co
 
 ## 8. Générer les secrets
 
-Sur votre PC Linux/macOS ou sur le serveur, générez trois valeurs différentes :
+Sur votre PC Linux/macOS ou sur le serveur, générez quatre valeurs différentes :
 
 ```bash
+openssl rand -hex 48
 openssl rand -hex 48
 openssl rand -hex 48
 openssl rand -hex 32
@@ -163,6 +164,7 @@ openssl rand -hex 32
 Utilisez-les respectivement pour :
 
 - `PADOCK_JWT_SECRET` ;
+- `PADOCK_ENCRYPTION_KEY` ;
 - `PADOCK_NODE_TOKEN` ;
 - `PADOCK_DATABASE_PASSWORD`.
 
@@ -182,7 +184,8 @@ Dans l’onglet **Environment** du service Docker Compose Dokploy, collez puis a
 
 ```env
 PADOCK_JWT_SECRET=REMPLACER_PAR_LE_PREMIER_SECRET
-PADOCK_NODE_TOKEN=REMPLACER_PAR_LE_DEUXIEME_SECRET
+PADOCK_ENCRYPTION_KEY=REMPLACER_PAR_LE_DEUXIEME_SECRET
+PADOCK_NODE_TOKEN=REMPLACER_PAR_LE_TROISIEME_SECRET
 PADOCK_DATABASE_PASSWORD=REMPLACER_PAR_LE_SECRET_POSTGRESQL
 
 PADOCK_PUBLIC_URL=https://panel.example.com
@@ -200,12 +203,38 @@ DOCKER_GID=999
 CURSEFORGE_API_KEY='VOTRE_CLE_CURSEFORGE'
 ```
 
+Variables facultatives pour les fonctions de production :
+
+```env
+# Alertes Discord/webhook
+PADOCK_ALERT_WEBHOOK=
+
+# Vérification e-mail et mot de passe oublié
+PADOCK_SMTP_HOST=smtp.example.com
+PADOCK_SMTP_PORT=587
+PADOCK_SMTP_USER=padock
+PADOCK_SMTP_PASSWORD='MOT_DE_PASSE_SMTP'
+PADOCK_SMTP_FROM='Padock <no-reply@example.com>'
+PADOCK_SMTP_SECURE=false
+
+# Sauvegardes S3 compatibles
+PADOCK_S3_ENDPOINT=https://s3.example.com
+PADOCK_S3_REGION=auto
+PADOCK_S3_BUCKET=padock
+PADOCK_S3_ACCESS_KEY=ACCESS_KEY
+PADOCK_S3_SECRET_KEY='SECRET_KEY'
+PADOCK_S3_PREFIX=padock/backups
+PADOCK_S3_FORCE_PATH_STYLE=false
+```
+
+Laissez entièrement vides les blocs SMTP ou S3 si vous ne les utilisez pas. `PADOCK_ENCRYPTION_KEY` doit rester stable : le changer sans conserver l’ancienne valeur rendrait les jetons de nœuds et secrets TOTP existants illisibles.
+
 Remplacez :
 
 - `example.com` par votre domaine ;
 - `203.0.113.10` par l’IP publique du serveur ;
 - `999` par le résultat de `stat -c '%g' /var/run/docker.sock` ;
-- les trois secrets par les valeurs générées ;
+- les quatre secrets par les valeurs générées ;
 - la clé CurseForge, ou laissez `CURSEFORGE_API_KEY=''` pour désactiver le catalogue.
 
 `PADOCK_GATEWAY_DOMAIN` contient le domaine de base, sans `*.` et sans protocole. Utilisez donc `mc.example.com`, pas `*.mc.example.com` et pas `https://mc.example.com`.
@@ -275,6 +304,10 @@ Lors du premier accès :
 
 Le nœud principal doit apparaître en ligne dans la page **Nœuds**.
 
+Le bouton **Modifier** d’un nœud permet de changer son nom, sa localisation et la connexion à l’agent. Un nouveau jeton reste facultatif et Padock teste toute nouvelle URL ou tout nouveau jeton avant de l’enregistrer. La même vue permet d’ajouter des plages de ports et de retirer uniquement les allocations qui ne sont utilisées par aucun serveur.
+
+Dans **Utilisateurs**, l’administrateur peut ensuite créer des rôles personnalisés, choisir leurs permissions globales et les attribuer aux comptes. Un compte peut recevoir des permissions supplémentaires en plus de son rôle. Les droits d’accès à la console, aux fichiers, aux sauvegardes, au SFTP ou à la suppression restent configurables séparément pour chaque serveur.
+
 ## 13. Créer le premier serveur Minecraft
 
 Depuis la vue générale :
@@ -287,9 +320,10 @@ Depuis la vue générale :
 6. vérifiez le sous-domaine proposé ;
 7. choisissez Paper, Vanilla, Purpur, Fabric, Forge ou NeoForge ;
 8. indiquez une version Minecraft précise ou `LATEST` ;
-9. configurez RAM, CPU et disque ;
-10. activez éventuellement l’installation d’un modpack CurseForge ;
-11. cliquez sur **Créer le serveur**.
+9. choisissez un port libre proposé dans la plage d’allocations du nœud ;
+10. configurez RAM, CPU et disque ;
+11. activez éventuellement l’installation d’un modpack CurseForge ;
+12. cliquez sur **Créer le serveur**.
 
 Exemple :
 
@@ -297,7 +331,7 @@ Exemple :
 Nom affiché       : Survie entre amis
 Sous-domaine      : survie
 Adresse joueur    : survie.mc.example.com
-Port interne      : attribué automatiquement, par exemple 25566
+Port interne      : choisi parmi les allocations libres, par exemple 25566
 ```
 
 Le port interne n’est pas visible par les joueurs et n’a pas besoin d’être ouvert dans le pare-feu.
