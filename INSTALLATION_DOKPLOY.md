@@ -2,6 +2,20 @@
 
 Ce guide décrit une installation complète sur un serveur Linux : Dokploy, Padock, PostgreSQL, l’agent Docker et Gate Lite. À la fin, le panel sera accessible avec une adresse HTTPS telle que `https://panel.example.com` et les joueurs pourront rejoindre un serveur avec `survie.mc.example.com`, sans écrire de port.
 
+Ce guide correspond au dépôt [`EmyxamTV/Padock`](https://github.com/EmyxamTV/Padock), branche `main`, et au fichier `compose.dokploy.yaml`. Il couvre une installation neuve sur un seul serveur Dokploy. Remplacez partout `example.com`, `203.0.113.10` et les valeurs commençant par `REMPLACER_` par vos propres informations.
+
+## Résultat attendu
+
+À la fin de l’installation :
+
+- `https://panel.example.com` ouvre Padock avec un certificat HTTPS valide ;
+- PostgreSQL conserve les comptes, rôles, nœuds, tâches et configurations ;
+- l’agent crée et contrôle les conteneurs Minecraft sur le serveur Linux ;
+- les joueurs rejoignent `nom-du-serveur.mc.example.com` sur le port standard `25565` ;
+- les ports internes des serveurs Minecraft restent inaccessibles depuis Internet ;
+- le SFTP est disponible sur le port `2022` si vous l’ouvrez ;
+- les modpacks CurseForge possédant un server pack peuvent être installés automatiquement.
+
 ## 1. Architecture utilisée
 
 ```text
@@ -42,6 +56,12 @@ Les ports suivants doivent être disponibles :
 
 N’ouvrez pas les ports internes `25566`, `25567`, etc. Ils sont liés à `127.0.0.1` et restent accessibles uniquement par Gate.
 
+Avant d’installer Dokploy, vérifiez que `80`, `443` et `3000` ne sont pas déjà utilisés :
+
+```bash
+sudo ss -ltnp | grep -E ':(80|443|3000)\b' || true
+```
+
 ## 3. Préparer le DNS
 
 Dans la zone DNS de votre domaine, ajoutez :
@@ -50,12 +70,14 @@ Dans la zone DNS de votre domaine, ajoutez :
 |:---:|---|---|---|
 | A | `panel` | `IP_DU_SERVEUR` | possible |
 | A | `*.mc` | `IP_DU_SERVEUR` | désactivé / DNS uniquement |
+| A | `sftp` | `IP_DU_SERVEUR` | désactivé / DNS uniquement, facultatif |
 
 Avec le domaine `example.com`, cela donne :
 
 ```text
 panel.example.com   A   203.0.113.10
 *.mc.example.com    A   203.0.113.10
+sftp.example.com    A   203.0.113.10
 ```
 
 Si vous utilisez Cloudflare, laissez impérativement le nuage gris, mode **DNS only**, sur `*.mc`. Le proxy Web Cloudflare standard ne transporte pas le protocole Minecraft TCP.
@@ -70,6 +92,8 @@ nslookup test.mc.example.com
 ```
 
 Les deux noms doivent retourner l’adresse IP publique du serveur.
+
+L’enregistrement `sftp.example.com` n’est nécessaire que si vous souhaitez utiliser ce nom dans les clients SFTP. Vous pouvez aussi utiliser `panel.example.com` comme hôte SFTP, car il pointe vers la même machine.
 
 ## 4. Installer Dokploy
 
@@ -135,10 +159,14 @@ Dans Dokploy :
 
 1. créez un **Project** nommé `Padock` ;
 2. ajoutez un service **Docker Compose** et non un Docker Stack ;
-3. sélectionnez votre fournisseur Git : GitHub, GitLab, Gitea ou Bitbucket ;
-4. choisissez le dépôt et la branche à déployer ;
-5. indiquez `compose.dokploy.yaml` comme chemin du fichier Compose ;
-6. enregistrez sans encore lancer le déploiement.
+3. sélectionnez GitHub ou le fournisseur **Git** ;
+4. utilisez le dépôt `https://github.com/EmyxamTV/Padock.git` ;
+5. choisissez la branche `main` ;
+6. indiquez `./compose.dokploy.yaml` comme **Compose Path** ;
+7. laissez Dokploy construire l’image depuis le dépôt ;
+8. si le dépôt devient privé, configurez auparavant une GitHub App ou les identifiants Git dans Dokploy ;
+9. n’ajoutez pas manuellement de `container_name` ni de labels Traefik au fichier Compose ;
+10. enregistrez sans encore lancer le déploiement.
 
 Le mode Docker Compose est nécessaire, notamment parce que cette installation construit l’image depuis le dépôt et utilise le réseau hôte Linux pour Gate.
 
@@ -149,6 +177,8 @@ Fichiers utiles du dépôt :
 - [`README.md`](README.md) : fonctions générales du panel.
 
 Documentation officielle : [Docker Compose dans Dokploy](https://docs.dokploy.com/docs/core/docker-compose).
+
+Après avoir ajouté les variables de la section suivante, utilisez **Preview Compose**. Vérifiez que les quatre services `padock`, `agent`, `database` et `gate` apparaissent, puis confirmez que les valeurs secrètes ne sont pas affichées dans une capture d’écran ou un ticket public.
 
 ## 8. Générer les secrets
 
@@ -169,6 +199,17 @@ Utilisez-les respectivement pour :
 - `PADOCK_DATABASE_PASSWORD`.
 
 Ne réutilisez pas le même secret et ne publiez jamais ces valeurs dans Git.
+
+Vous pouvez générer un bloc prêt à copier avec :
+
+```bash
+printf 'PADOCK_JWT_SECRET=%s\n' "$(openssl rand -hex 48)"
+printf 'PADOCK_ENCRYPTION_KEY=%s\n' "$(openssl rand -hex 48)"
+printf 'PADOCK_NODE_TOKEN=%s\n' "$(openssl rand -hex 48)"
+printf 'PADOCK_DATABASE_PASSWORD=%s\n' "$(openssl rand -hex 32)"
+```
+
+Conservez une copie chiffrée de `PADOCK_ENCRYPTION_KEY`. Cette clé sert à relire les jetons de nœuds et les secrets TOTP existants après une restauration.
 
 Récupérez aussi le groupe du socket Docker :
 
@@ -195,7 +236,7 @@ PADOCK_GATEWAY_DNS_TARGET=203.0.113.10
 PADOCK_SERVERS_DIR=/var/lib/padock/servers
 PADOCK_BACKUPS_DIR=/var/lib/padock/backups
 
-PADOCK_SFTP_PUBLIC_HOST=panel.example.com
+PADOCK_SFTP_PUBLIC_HOST=sftp.example.com
 PADOCK_SFTP_PUBLIC_PORT=2022
 PADOCK_MINECRAFT_IMAGE=itzg/minecraft-server:java25
 DOCKER_GID=999
@@ -229,6 +270,8 @@ PADOCK_S3_FORCE_PATH_STYLE=false
 
 Laissez entièrement vides les blocs SMTP ou S3 si vous ne les utilisez pas. `PADOCK_ENCRYPTION_KEY` doit rester stable : le changer sans conserver l’ancienne valeur rendrait les jetons de nœuds et secrets TOTP existants illisibles.
 
+Pour SMTP, utilisez généralement le port `587` avec `PADOCK_SMTP_SECURE=false`, ou le port `465` avec `PADOCK_SMTP_SECURE=true`, selon les indications de votre fournisseur. Pour Cloudflare R2, MinIO ou certains services S3 compatibles, l’endpoint est obligatoire ; avec AWS S3, il peut être laissé vide si la région et le bucket sont renseignés.
+
 Remplacez :
 
 - `example.com` par votre domaine ;
@@ -237,9 +280,19 @@ Remplacez :
 - les quatre secrets par les valeurs générées ;
 - la clé CurseForge, ou laissez `CURSEFORGE_API_KEY=''` pour désactiver le catalogue.
 
+Ne terminez pas `PADOCK_PUBLIC_URL` par `/`. L’hôte SFTP doit être un nom DNS ou une IP joignable par les utilisateurs, sans `sftp://` et sans numéro de port.
+
 `PADOCK_GATEWAY_DOMAIN` contient le domaine de base, sans `*.` et sans protocole. Utilisez donc `mc.example.com`, pas `*.mc.example.com` et pas `https://mc.example.com`.
 
 Si la clé CurseForge contient `$`, `#`, `!` ou `&`, conservez les apostrophes simples. Elles empêchent l’interpréteur `.env` de modifier la clé.
+
+Après avoir enregistré les variables, ouvrez de nouveau **Preview Compose** et contrôlez particulièrement :
+
+- `padock` expose seulement le port interne `3000` à Traefik ;
+- `agent` publie `2022:2022` ; si vous n’utilisez pas le SFTP, ne laissez pas le port `2022` ouvert dans les pare-feu ;
+- `gate` utilise `network_mode: host` et écoute sur `25565` ;
+- `database` ne publie aucun port PostgreSQL sur Internet ;
+- les chemins `/var/lib/padock/servers` et `/var/lib/padock/backups` sont bien montés dans `agent`.
 
 ## 10. Déployer une première fois
 
@@ -257,6 +310,8 @@ L’état attendu est :
 - `database` : healthy ;
 - `gate` : running.
 
+Le premier build télécharge les dépendances Node.js et peut prendre plusieurs minutes. Ne relancez pas immédiatement le déploiement : ouvrez l’onglet **Deployments**, suivez les logs jusqu’à la fin, puis consultez les logs de chaque service. PostgreSQL applique automatiquement les migrations au démarrage du panel.
+
 Dans les logs Gate, vous devez trouver des messages similaires à :
 
 ```text
@@ -265,6 +320,8 @@ listening for connections {"addr":"0.0.0.0:25565"}
 ```
 
 Avant le premier serveur, Padock crée une route sentinelle interne afin que Gate puisse démarrer. Cette route est remplacée automatiquement dès qu’un vrai sous-domaine est attribué.
+
+Si `padock` reste unhealthy, vérifiez d’abord `database`, puis recherchez dans les logs du panel une erreur `DATABASE_URL`, `permission denied` ou `PADOCK_ENCRYPTION_KEY`. Une route Dokploy ne fonctionnera pas tant que le healthcheck du service échoue.
 
 ## 11. Ajouter le domaine HTTPS du panel dans Dokploy
 
@@ -302,11 +359,29 @@ Lors du premier accès :
 3. validez la création du panel ;
 4. ouvrez **Mon profil** pour renseigner votre adresse e-mail réelle si nécessaire.
 
+Sécurisez immédiatement le premier compte :
+
+1. ouvrez **Mon profil** ;
+2. activez l’authentification à deux facteurs ;
+3. enregistrez les codes de récupération dans un gestionnaire de mots de passe ;
+4. contrôlez la liste des sessions ouvertes ;
+5. si SMTP est configuré, demandez la vérification de l’adresse e-mail ;
+6. ne créez une clé API que pour une intégration qui en a réellement besoin.
+
 Le nœud principal doit apparaître en ligne dans la page **Nœuds**.
 
 Le bouton **Modifier** d’un nœud permet de changer son nom, sa localisation et la connexion à l’agent. Un nouveau jeton reste facultatif et Padock teste toute nouvelle URL ou tout nouveau jeton avant de l’enregistrer. La même vue permet d’ajouter des plages de ports et de retirer uniquement les allocations qui ne sont utilisées par aucun serveur.
 
 Dans **Utilisateurs**, l’administrateur peut ensuite créer des rôles personnalisés, choisir leurs permissions globales et les attribuer aux comptes. Un compte peut recevoir des permissions supplémentaires en plus de son rôle. Les droits d’accès à la console, aux fichiers, aux sauvegardes, au SFTP ou à la suppression restent configurables séparément pour chaque serveur.
+
+Dans **Nœuds**, définissez ensuite :
+
+- la capacité totale en RAM, CPU et disque du serveur ;
+- une plage d’allocations, par exemple `25566-25620` ;
+- le mode maintenance avant toute intervention sur l’hôte ;
+- des limites cohérentes avec les ressources réellement disponibles.
+
+Padock refuse un port situé hors des allocations du nœud et réserve atomiquement une allocation pendant une création ou un transfert.
 
 ## 13. Créer le premier serveur Minecraft
 
@@ -362,6 +437,43 @@ Adresse du serveur : survie.mc.example.com
 
 N’ajoutez ni `https://` ni `:25566`. Le client Minecraft utilise automatiquement `25565`, puis Gate sélectionne le backend grâce au sous-domaine.
 
+### Valider le serveur dans Padock
+
+Avant d’inviter des joueurs :
+
+1. ouvrez l’onglet **Console** et attendez le message de démarrage complet ;
+2. envoyez `list` depuis la console ;
+3. ouvrez **Fichiers** et vérifiez la présence de `server.properties` et du monde ;
+4. contrôlez les graphiques CPU, RAM, disque et joueurs dans **Monitoring** ;
+5. ouvrez **Opérations** et vérifiez que la tâche de création est terminée sans erreur ;
+6. arrêtez puis redémarrez le serveur une fois depuis Padock.
+
+Pour un modpack CurseForge, seuls les projets et versions possédant un server pack officiel sont proposés. Si aucun server pack n’est fourni par l’auteur, Padock masque la version ou refuse l’installation au lieu d’utiliser les fichiers du client.
+
+### Tester le SFTP
+
+Dans le serveur Padock, créez un compte SFTP, choisissez les dossiers autorisés et activez éventuellement le mode lecture seule. Connectez-vous ensuite avec un client tel que FileZilla ou WinSCP :
+
+```text
+Protocole : SFTP
+Hôte      : sftp.example.com
+Port      : 2022
+Utilisateur et mot de passe : valeurs affichées lors de la création du compte
+```
+
+Vérifiez qu’un compte limité ne peut ni remonter hors du serveur ni ouvrir un dossier non autorisé. Supprimez les comptes de test inutiles.
+
+### Tester une sauvegarde
+
+1. créez une sauvegarde manuelle depuis Padock ;
+2. attendez la fin de la tâche dans **Opérations** ;
+3. vérifiez sa taille et son emplacement local ou S3 ;
+4. modifiez un petit fichier non critique ;
+5. restaurez la sauvegarde ;
+6. vérifiez que le fichier a retrouvé son état initial.
+
+Une sauvegarde qui n’a jamais été restaurée ne doit pas être considérée comme validée.
+
 ## 15. Modifier un sous-domaine
 
 Dans Padock :
@@ -409,12 +521,31 @@ auto-reloading config
 reloaded config successfully
 ```
 
+Tester l’API publique du panel :
+
+```bash
+curl -fsS https://panel.example.com/api/health
+```
+
+La réponse doit contenir `"ok":true`, `"database":"postgresql"` et le nœud principal avec `"online":true`. Le champ `mail` reste à `false` tant que SMTP n’est pas configuré.
+
+Validez ensuite les intégrations facultatives depuis l’interface :
+
+- demandez un e-mail de vérification pour tester SMTP ;
+- envoyez une notification de test pour contrôler le webhook ;
+- créez une sauvegarde distante et vérifiez l’indicateur `S3` ;
+- consultez **Opérations** pour confirmer qu’aucune tâche n’est bloquée ou en échec.
+
 ## 17. Mise à jour de Padock
 
-1. poussez la nouvelle version dans la branche configurée ;
-2. ouvrez le service Padock dans Dokploy ;
-3. cliquez sur **Deploy**, ou activez l’Auto Deploy/Webhook ;
-4. surveillez les logs des quatre services.
+1. créez une sauvegarde PostgreSQL et une sauvegarde des mondes ;
+2. vérifiez que vous possédez toujours les quatre secrets de production ;
+3. poussez la nouvelle version dans la branche configurée ;
+4. ouvrez le service Padock dans Dokploy ;
+5. contrôlez **Preview Compose** ;
+6. cliquez sur **Deploy**, ou activez l’Auto Deploy/Webhook ;
+7. surveillez les logs des quatre services ;
+8. vérifiez `/api/health`, le nœud, Gate et un serveur Minecraft.
 
 Les migrations PostgreSQL sont appliquées automatiquement au démarrage. Les mondes restent dans `/var/lib/padock/servers`, les sauvegardes dans `/var/lib/padock/backups`, et les volumes Docker conservent PostgreSQL ainsi que les données du panel.
 
@@ -424,16 +555,56 @@ Les volumes Docker `panelmc-*` conservent volontairement leur ancien identifiant
 
 Sauvegardez au minimum :
 
-- le volume Docker PostgreSQL `panelmc-postgres` ;
-- le volume `panelmc-panel` ;
+- le volume Docker PostgreSQL dont le nom logique est `panelmc-postgres` ;
+- le volume panel dont le nom logique est `panelmc-panel` ;
+- le volume Gate dont le nom logique est `panelmc-gateway` ;
 - `/var/lib/padock/servers` ;
 - `/var/lib/padock/backups`.
+
+Docker préfixe généralement les volumes avec le nom du projet Compose. Vérifiez leurs noms réels avec :
+
+```bash
+docker volume ls | grep -E 'panelmc-(postgres|panel|gateway)'
+```
 
 Dokploy peut sauvegarder les volumes nommés vers une destination S3. Les dossiers `/var/lib/padock` doivent être inclus dans votre propre stratégie de sauvegarde hôte, par exemple avec Restic, Borg ou un snapshot du VPS.
 
 Testez régulièrement une restauration sur une machine séparée.
 
+Conservez également, dans un coffre-fort séparé :
+
+- `PADOCK_ENCRYPTION_KEY` ;
+- `PADOCK_JWT_SECRET` ;
+- `PADOCK_NODE_TOKEN` ;
+- `PADOCK_DATABASE_PASSWORD` ;
+- la configuration DNS et la liste des domaines ;
+- les identifiants S3 si les sauvegardes distantes sont activées.
+
+### Ordre de restauration sur un nouveau serveur
+
+1. installez Dokploy ;
+2. recréez `/var/lib/padock/servers` et `/var/lib/padock/backups` ;
+3. restaurez ces deux dossiers ;
+4. restaurez les volumes PostgreSQL, panel et Gate ;
+5. recréez l’application Compose avec les mêmes variables et surtout la même `PADOCK_ENCRYPTION_KEY` ;
+6. redéployez Padock ;
+7. vérifiez le nœud avant de démarrer les serveurs ;
+8. contrôlez les routes Gate et testez une connexion Minecraft.
+
 ## 19. Dépannage
+
+### Le build échoue dans Dokploy
+
+Vérifiez :
+
+- que le dépôt est accessible à Dokploy ;
+- que la branche est `main` ;
+- que le Compose Path est `./compose.dokploy.yaml` ;
+- qu’il reste assez d’espace avec `df -h` et `docker system df` ;
+- que les quatre secrets obligatoires ne sont pas vides ;
+- que **Preview Compose** ne signale aucune interpolation invalide.
+
+Ne supprimez pas les volumes pour résoudre une erreur de build : ils contiennent les données persistantes.
 
 ### Le domaine du panel affiche une erreur 404 ou 502
 
@@ -495,6 +666,14 @@ sudo chmod 750 /var/lib/padock
 
 Puis redéployez `padock` et `agent`.
 
+Si l’erreur concerne `/var/run/docker.sock`, contrôlez plutôt :
+
+```bash
+stat -c 'socket=%n uid=%u gid=%g mode=%a' /var/run/docker.sock
+```
+
+Reportez le GID affiché dans `DOCKER_GID`, enregistrez les variables Dokploy, puis redéployez.
+
 ### La clé CurseForge ne fonctionne pas
 
 Utilisez :
@@ -504,6 +683,22 @@ CURSEFORGE_API_KEY='clé-complète-avec-caractères-spéciaux'
 ```
 
 Conservez les apostrophes simples et redéployez `padock` ainsi que `agent`. Les modpacks sans server pack officiel sont volontairement masqués et ne peuvent pas être installés automatiquement.
+
+### Une création, sauvegarde ou restauration reste bloquée
+
+Ouvrez **Opérations** dans Padock :
+
+1. consultez le message et la progression de la tâche ;
+2. vérifiez que le nœud n’est pas en maintenance ;
+3. vérifiez sa capacité et ses allocations libres ;
+4. ouvrez les logs `padock` et `agent` dans Dokploy ;
+5. corrigez la cause, puis utilisez **Réessayer**.
+
+Après un redémarrage du panel, les tâches persistantes inachevées sont récupérées. Ne créez pas plusieurs fois le même serveur pendant qu’une tâche est encore active.
+
+### SMTP ou S3 ne fonctionne pas
+
+Pour SMTP, contrôlez le couple port/`PADOCK_SMTP_SECURE`, les identifiants et l’adresse d’expéditeur autorisée. Pour S3, vérifiez l’endpoint, la région, le bucket, les droits de lecture/écriture/suppression et `PADOCK_S3_FORCE_PATH_STYLE` pour MinIO. Après toute modification des variables, redéployez le Compose.
 
 ### Une ancienne instance utilise le port 25565
 
@@ -521,10 +716,17 @@ Le port hôte `25565` est réservé à Gate. Arrêtez l’ancienne instance avan
 - [ ] Les ports 80, 443 et 25565/TCP sont ouverts.
 - [ ] Les ports internes Minecraft ne sont pas ouverts publiquement.
 - [ ] Le nœud principal est en ligne dans Padock.
+- [ ] Une plage de ports et les capacités du nœud sont configurées.
+- [ ] La 2FA administrateur est activée et les codes de récupération sont sauvegardés.
 - [ ] Le premier serveur a un sous-domaine.
 - [ ] Gate recharge sa route avec succès.
 - [ ] La connexion Minecraft fonctionne sans saisir de port.
+- [ ] La console, les fichiers et un redémarrage du serveur ont été testés.
+- [ ] Les restrictions d’un compte SFTP ont été vérifiées, si SFTP est utilisé.
+- [ ] SMTP, S3 et le webhook ont été testés s’ils sont configurés.
 - [ ] Les sauvegardes PostgreSQL et des mondes sont configurées.
+- [ ] Une restauration de sauvegarde a été testée.
+- [ ] `PADOCK_ENCRYPTION_KEY` et les autres secrets sont conservés hors du serveur.
 
 ## Sources officielles
 

@@ -14,6 +14,7 @@
     "test:sftp": "npm run build && node scripts/sftp-smoke.mjs",
     "test:operations": "npm run build && node scripts/operations-smoke.mjs",
     "test:backups": "npm run build && node scripts/backup-stream-smoke.mjs",
+    "test:console": "npm run build && node scripts/console-race-smoke.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.agent.json && tsc --noEmit -p tsconfig.web.json"
   },
   "dependencies": {

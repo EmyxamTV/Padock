@@ -248,8 +248,11 @@ export class NodeDocker {
     catch (error) {
       if ((error as { statusCode?: number }).statusCode !== 404) throw error;
       const legacy = this.docker.getContainer(`panelmc-${id}`);
-      await legacy.inspect();
-      return legacy;
+      try { await legacy.inspect(); return legacy; }
+      catch (legacyError) {
+        if ((legacyError as { statusCode?: number }).statusCode !== 404) throw legacyError;
+        throw Object.assign(new Error(`Conteneur Padock ${id} introuvable.`), { statusCode: 404, code: 'PADOCK_CONTAINER_NOT_FOUND' });
+      }
     }
   }
 

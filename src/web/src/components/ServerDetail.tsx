@@ -10,6 +10,7 @@ export function ServerDetail({ server, gateway, nodes, users, onChanged, onDelet
   const [lines, setLines] = useState<string[]>([]);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
+  const [consoleError, setConsoleError] = useState('');
   const [copiedAddress, setCopiedAddress] = useState(false);
   const [tab, setTab] = useState<ServerTab>('console');
   const [stats, setStats] = useState<ServerStats>({ cpuPercent: 0, memoryBytes: 0, memoryLimitBytes: 0, networkRxBytes: 0, networkTxBytes: 0, diskBytes: 0 });
@@ -25,16 +26,20 @@ export function ServerDetail({ server, gateway, nodes, users, onChanged, onDelet
   const canMembers = server.permissions.includes('members.manage');
   const canDelete = server.permissions.includes('server.delete');
   const supportsContent = server.software !== 'VANILLA';
+  const consoleReady = ['running', 'starting', 'stopped'].includes(server.status);
 
   useEffect(() => {
-    if (!canConsole) return;
     setLines([]);
+    setConsoleError('');
+    if (!canConsole || !consoleReady) return;
     const socket: Socket = io();
     socket.on('connect', () => socket.emit('console:subscribe', server.id));
     socket.on('console:line', (line: string) => setLines((current) => [...current, ...line.split('\n').filter(Boolean)].slice(-500)));
-    socket.on('console:error', setError);
+    socket.on('console:ready', () => setConsoleError(''));
+    socket.on('console:pending', () => setConsoleError(''));
+    socket.on('console:error', setConsoleError);
     return () => { socket.disconnect(); };
-  }, [server.id, server.status, canConsole]);
+  }, [server.id, server.status, canConsole, consoleReady]);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [lines]);
 
@@ -93,6 +98,7 @@ export function ServerDetail({ server, gateway, nodes, users, onChanged, onDelet
     </div>
     {diagnostic && <div className={`runtime-diagnostic ${diagnostic.level}`}><strong>{diagnostic.level === 'danger' ? 'Action requise' : 'À vérifier'}</strong><span>{diagnostic.message}</span>{server.runtime?.finishedAt && <small>Dernier arrêt : {new Date(server.runtime.finishedAt).toLocaleString('fr-FR')}</small>}</div>}
     {error && <div className="alert">{error}<button onClick={() => setError('')}>×</button></div>}
+    {consoleError && <div className="alert">{consoleError}<button onClick={() => setConsoleError('')}>×</button></div>}
 
     <div className="server-tabs">
       {canConsole && <Tab active={tab === 'console'} onClick={() => setTab('console')}>⌁ Console</Tab>}

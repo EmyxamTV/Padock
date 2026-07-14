@@ -1285,10 +1285,16 @@ io.on('connection', (socket) => {
     const server = findServer(id); const user = store.snapshot.users.find((item) => item.id === socket.data.userId);
     if (!server || !user || !hasPermission(user, server, 'console.read')) return socket.emit('console:error', 'Accès à la console refusé.');
     try {
+      const state = await clientFor(server).state(server);
+      if (state.status === 'missing') return socket.emit('console:pending');
       const stream = await clientFor(server).logs(server) as DestroyableReadableStream; logStream = stream;
       stream.on('data', (chunk: Buffer) => socket.emit('console:line', stripDockerHeader(chunk)));
       stream.on('error', (error: Error) => socket.emit('console:error', error.message));
-    } catch (error) { socket.emit('console:error', (error as Error).message); }
+      socket.emit('console:ready');
+    } catch (error) {
+      if (isMissingContainerError(error)) return socket.emit('console:pending');
+      socket.emit('console:error', (error as Error).message);
+    }
   });
   socket.on('disconnect', () => logStream?.destroy());
 });
@@ -1686,4 +1692,5 @@ async function syncPersistedSftpAccounts() {
 
 function sessionCookie() { return { path: '/', httpOnly: true, sameSite: 'strict' as const, secure: padockEnv('PUBLIC_URL')?.startsWith('https://') ?? false, maxAge: 60 * 60 * 12 }; }
 function stripDockerHeader(chunk: Buffer) { let offset = 0; let output = ''; while (offset + 8 <= chunk.length) { const size = chunk.readUInt32BE(offset + 4); if (offset + 8 + size > chunk.length) return output + chunk.subarray(offset).toString(); output += chunk.subarray(offset + 8, offset + 8 + size).toString(); offset += 8 + size; } return output || chunk.toString(); }
+function isMissingContainerError(error: unknown) { return /(?:no such container|conteneur .* introuvable)/i.test((error as Error)?.message ?? ''); }
 interface DestroyableReadableStream extends NodeJS.ReadableStream { destroy(error?: Error): void; }
