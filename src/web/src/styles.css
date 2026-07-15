@@ -74,3 +74,23 @@ label{display:flex;flex-direction:column;gap:8px;color:#a5a7b2;font-size:11px;fo
 .monitoring-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:20px}.monitoring-kpis>div{padding:13px;border:1px solid #292c36;border-radius:8px;background:#15171f}.monitoring-kpis small,.monitoring-kpis strong{display:block}.monitoring-kpis small{color:#646877;font-size:7px}.monitoring-kpis strong{margin-top:7px;font:12px 'DM Mono'}.metric-chart{display:grid;grid-template-columns:70px 1fr;align-items:center;gap:10px;margin-top:10px}.metric-chart>strong{font-size:9px}.metric-chart>div{display:flex;align-items:flex-end;gap:2px;height:68px;padding:6px;border:1px solid #282b35;border-radius:7px;background:#0e1016}.metric-chart span{flex:1;min-width:2px;border-radius:2px 2px 0 0;background:#8474e8}.metric-chart span.blue{background:#609fd8}.metric-chart span.green{background:#5fc990}.policy-panel,.lifecycle-panel{min-height:0}.policy-panel form{display:flex;flex-direction:column;gap:8px}.lifecycle-actions{display:flex;justify-content:flex-end;gap:8px}.quota-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:14px 0}.quota-grid label{margin:0;padding:12px;border:1px solid #292c36;border-radius:8px;background:#15171f}.security-center{min-height:0}.security-secret{display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:13px;border:1px solid #3d3658;border-radius:9px;background:#151321}.security-secret p,.security-secret strong{flex-basis:100%;margin:0;font-size:9px}.security-secret code,.recovery-codes code{padding:7px;border-radius:5px;background:#0c0e13;color:#afa2fa;font:9px 'DM Mono'}.security-secret label{flex:1;margin:0}.recovery-codes{display:grid;grid-template-columns:repeat(2,1fr);gap:7px;margin-top:12px;padding:13px;border:1px solid #4c4225;border-radius:8px;background:#211c11}.recovery-codes strong{grid-column:1/-1;color:#d7b964;font-size:9px}.security-list article{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 0;border-bottom:1px solid #252832}.security-list strong,.security-list small{display:block}.security-list strong{font-size:9px}.security-list small{margin-top:5px;color:#696d7b;font-size:7px}.profile-overview{grid-row:1/span 8}
 @media(max-width:1050px){.operations-layout{grid-template-columns:1fr}.operations-panel,.notification-panel{min-height:0}.monitoring-kpis,.quota-grid{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:650px){.operation-item{grid-template-columns:auto 1fr}.operation-actions{grid-column:2}.monitoring-kpis,.quota-grid{grid-template-columns:1fr}.metric-chart{grid-template-columns:1fr}.lifecycle-actions{align-items:stretch;flex-direction:column}}
+
+/* Readability baseline: keep dense administrative screens legible on large displays. */
+body{font-size:13px;line-height:1.45}
+.brand small,.nav-label,.sidebar-user small{font-size:10px;line-height:1.45}
+main p{font-size:12px!important;line-height:1.55}
+main small{font-size:11px!important;line-height:1.5}
+main label{font-size:13px!important;line-height:1.45}
+main button,main input,main select,main textarea{font-size:13px!important}
+main code{font-size:11px!important;line-height:1.4}
+main th{font-size:11px;line-height:1.4}
+main td{font-size:13px;line-height:1.5}
+.eyebrow{font-size:11px!important;line-height:1.35}
+.section-head>span,.node-footer,.allocation-line span,.content-toolbar>span,.properties-actions span,.credential-footer,.profile-actions span{font-size:12px;line-height:1.45}
+.badge,.role-badge,.result,.result.queued,.result.running,.result.cancelled,.pack-compat,.live,.subhead{font-size:11px;line-height:1.35}
+.current-user,.permission-summary span,.permission-picker-head span,.server-permission-grid em,.readonly-field{font-size:11px!important;line-height:1.4}
+.permission-options strong,.server-permission-grid strong,.member-list article>div>strong,.operation-main strong,.notification-list strong,.security-list strong,.metric-chart>strong{font-size:12px;line-height:1.4}
+.file-row.header,.server-diagnostic,.audit-meta,.selected-pack,.source-note,.folder-location code,.activity-list code,.credential-footer code,.member-permissions code{font-size:11px!important;line-height:1.4}
+.detail-metrics strong,.monitoring-kpis strong,.installed-list strong,.resource-save strong,.resource-recommendation strong{font-size:13px;line-height:1.4}
+.notification-button span{min-width:20px;height:20px;font-size:11px;line-height:20px}
+.console-output{font-size:13px;line-height:1.55}
