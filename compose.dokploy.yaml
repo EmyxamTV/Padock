@@ -66,6 +66,7 @@ services:
       PADOCK_SERVERS_DIR: /var/lib/padock/servers
       PADOCK_BACKUPS_DIR: /var/lib/padock/backups
       PADOCK_MINECRAFT_IMAGE: ${PADOCK_MINECRAFT_IMAGE:-${PANELMC_MINECRAFT_IMAGE:-itzg/minecraft-server:java25}}
+      PADOCK_STEAMCMD_IMAGE: ${PADOCK_STEAMCMD_IMAGE:-steamcmd/steamcmd:ubuntu-22}
       PADOCK_GATEWAY_ENABLED: "true"
       PADOCK_GATEWAY_PORT: 25565
       PADOCK_GATEWAY_BACKEND_BIND: 127.0.0.1

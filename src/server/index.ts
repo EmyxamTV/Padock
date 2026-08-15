@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
 import jwt from '@fastify/jwt';
@@ -15,11 +16,13 @@ import { NodeClient } from './node-client.js';
 import { allowedKinds, curseForgeConfigured, resolveCurseForgeFiles, resolveCurseForgeModpack, searchCurseForge } from './curseforge.js';
 import { padockEnv } from './config.js';
 import { mailConfigured, sendAccountMail } from './mail.js';
-import type { Allocation, AuditEntry, JobKind, MinecraftServer, PanelJob, PanelNotification, PanelPermission, PanelRole, ServerPermission, ServerSchedule, SftpAccount, UserGroup, UserRecord } from './types.js';
+import { steamAllocationOffsets, steamGameById, steamGames } from './steam-games.js';
+import type { Allocation, AuditEntry, JobKind, MinecraftServer, PanelJob, PanelNotification, PanelPermission, PanelRole, ServerPermission, ServerPort, ServerSchedule, SftpAccount, UserGroup, UserRecord } from './types.js';
 
 const host = padockEnv('HOST') ?? '0.0.0.0';
 const port = Number(padockEnv('PORT') ?? 3000);
 const dataDir = path.resolve(padockEnv('DATA_DIR') ?? './data');
+const jarsDir = path.join(dataDir, 'jars');
 const isProduction = process.env.NODE_ENV === 'production';
 const jwtSecret = padockEnv('JWT_SECRET') ?? (isProduction ? '' : 'padock-development-secret-change-me');
 const publicUrl = padockEnv('PUBLIC_URL') ?? `http://localhost:${port}`;
@@ -37,6 +40,8 @@ const lastRestartCounts = new Map<string, number>();
 let collectingMetrics = false;
 let monitoringCrashes = false;
 await store.load();
+await rm(jarsDir, { recursive: true, force: true });
+await mkdir(jarsDir, { recursive: true });
 await store.update((draft) => {
   for (const job of draft.jobs) if (job.status === 'running') { job.status = 'queued'; job.step = 'Reprise après redémarrage du panel'; job.updatedAt = new Date().toISOString(); }
   for (const allocation of draft.allocations) if (allocation.reservationId && !draft.jobs.some((job) => job.id === allocation.reservationId && ['queued', 'running'].includes(job.status))) allocation.reservationId = undefined;
@@ -112,7 +117,8 @@ const sftpAccountUpdateSchema = z.object({
 }).refine((value) => Object.keys(value).length > 0, 'Aucune modification reçue.');
 const serverSchema = z.object({
   name: z.string().trim().min(2).max(40).regex(/^[\p{L}\p{N} _.-]+$/u),
-  software: z.enum(['PAPER', 'VANILLA', 'PURPUR', 'FABRIC', 'FORGE', 'NEOFORGE']).default('PAPER'),
+  platform: z.enum(['minecraft', 'steamcmd']).default('minecraft'),
+  software: z.enum(['PAPER', 'VANILLA', 'PURPUR', 'FABRIC', 'FORGE', 'NEOFORGE', 'CUSTOM', 'STEAMCMD']).default('PAPER'),
   version: z.string().trim().min(1).max(30).default('LATEST'),
   memoryMb: z.number().int().min(1024).max(65536),
   cpuPercent: z.number().int().min(10).max(1600).default(100),
@@ -123,7 +129,15 @@ const serverSchema = z.object({
   ownerId: z.string().optional(),
   subdomain: z.string().trim().toLowerCase().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/).optional(),
   modpack: z.object({ projectId: z.number().int().positive(), slug: z.string().regex(/^[a-z0-9-]{2,100}$/i) }).optional(),
-});
+  customJar: z.object({ uploadId: z.string().regex(/^[a-f0-9]{16}$/), filename: z.string().trim().min(1).max(240) }).optional(),
+  steamGameId: z.string().regex(/^[a-z0-9-]{2,50}$/).optional(),
+})
+  .refine((value) => value.platform !== 'steamcmd' || value.software === 'STEAMCMD' && Boolean(value.steamGameId), { message: 'Choisissez un jeu SteamCMD.', path: ['steamGameId'] })
+  .refine((value) => value.platform !== 'minecraft' || value.software !== 'STEAMCMD' && !value.steamGameId, { message: 'Configuration Minecraft invalide.', path: ['software'] })
+  .refine((value) => value.platform === 'minecraft' || !value.subdomain && !value.modpack && !value.customJar, { message: 'Les domaines Gate et les modpacks sont réservés aux serveurs Minecraft.', path: ['platform'] })
+  .refine((value) => value.software !== 'CUSTOM' || value.platform === 'minecraft' && Boolean(value.customJar), { message: 'Choisissez un fichier jar personnalisé.', path: ['customJar'] })
+  .refine((value) => !value.customJar || value.software === 'CUSTOM', { message: 'Un jar personnalisé ne s’applique qu’au logiciel « Jar personnalisé ».', path: ['software'] })
+  .refine((value) => value.software !== 'CUSTOM' || !value.modpack, { message: 'Les modpacks CurseForge sont incompatibles avec un jar personnalisé.', path: ['modpack'] });
 
 app.get('/api/health', async () => {
   const nodes = await Promise.all(store.snapshot.nodes.map(async (node) => {
@@ -612,6 +626,7 @@ app.post('/api/templates', { preHandler: [auth, requirePanelPermission('servers.
 
 app.post('/api/servers/:id/template', { preHandler: auth }, async (request, reply) => {
   const server = authorizedServer(request, reply, (request.params as { id: string }).id, 'settings.manage'); if (!server) return;
+  if (server.platform === 'steamcmd') return reply.code(409).send({ error: 'Les modèles SteamCMD seront disponibles dans une prochaine version.' });
   const parsed = z.object({ name: z.string().trim().min(2).max(50), description: z.string().trim().max(200).default('') }).safeParse(request.body);
   if (!parsed.success) return reply.code(400).send({ error: 'Nom de modèle invalide.' });
   if (store.snapshot.templates.some((item) => item.name.toLowerCase() === parsed.data.name.toLowerCase())) return reply.code(409).send({ error: 'Un modèle porte déjà ce nom.' });
@@ -624,6 +639,17 @@ app.delete('/api/templates/:id', { preHandler: [auth, requirePanelPermission('se
   const user = currentUser(request)!; if (user.role !== 'admin' && template.createdBy !== user.id) return reply.code(403).send({ error: 'Seul le créateur ou un administrateur peut supprimer ce modèle.' });
   await store.update((draft) => { draft.templates = draft.templates.filter((item) => item.id !== id); draft.auditLogs.unshift(audit(user.id, 'template.delete', 'template', id)); }); return { ok: true };
 });
+
+app.get('/api/steam/games', { preHandler: [auth, requirePanelPermission('servers.create')] }, async () => steamGames.map((game) => ({
+  id: game.id,
+  name: game.name,
+  description: game.description,
+  appId: game.appId,
+  ports: game.ports.map(({ name, internalPort, allocationOffset, protocol }) => ({ name, internalPort, allocationOffset, protocol })),
+  requiredAllocations: steamAllocationOffsets(game).length,
+  recommendedMemoryMb: game.recommendedMemoryMb,
+  recommendedDiskMb: game.recommendedDiskMb,
+})));
 
 app.get('/api/curseforge/modpacks', { preHandler: [auth, requirePanelPermission('servers.create')] }, async (request, reply) => {
   const parsed = z.object({
@@ -640,9 +666,20 @@ app.get('/api/curseforge/modpacks', { preHandler: [auth, requirePanelPermission(
   };
 });
 
+app.put('/api/jars', { preHandler: [auth, requirePanelPermission('servers.create')] }, async (request, reply) => {
+  const filename = String((request.query as { filename?: string }).filename ?? '').trim().replace(/[\\/]/g, '_').slice(0, 240);
+  if (!filename || !Buffer.isBuffer(request.body) || request.body.length === 0) return reply.code(400).send({ error: 'Upload de jar invalide.' });
+  const uploadId = randomUUID().replace(/-/g, '').slice(0, 16);
+  await writeFile(path.join(jarsDir, `${uploadId}.jar`), request.body);
+  await recordAudit(currentUser(request)?.id, 'jar.stage', 'panel', uploadId, { filename, size: request.body.length });
+  return reply.code(201).send({ uploadId, filename });
+});
+
 app.post('/api/servers', { preHandler: [auth, requirePanelPermission('servers.create')] }, async (request, reply) => {
   const parsed = serverSchema.safeParse(request.body);
   if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message });
+  const steamGame = parsed.data.platform === 'steamcmd' ? steamGameById(parsed.data.steamGameId!) : undefined;
+  if (parsed.data.platform === 'steamcmd' && !steamGame) return reply.code(400).send({ error: 'Jeu SteamCMD inconnu.' });
   const node = store.snapshot.nodes.find((item) => item.id === parsed.data.nodeId);
   if (!node) return reply.code(404).send({ error: 'Nœud Linux introuvable.' });
   if (node.maintenance) return reply.code(409).send({ error: node.maintenanceMessage || 'Ce nœud est actuellement en maintenance.' });
@@ -665,27 +702,43 @@ app.post('/api/servers', { preHandler: [auth, requirePanelPermission('servers.cr
   }
   const id = randomUUID().slice(0, 8);
   const jobId = randomUUID().slice(0, 8);
-  const domain = parsed.data.subdomain ? gateway.domainFor(parsed.data.subdomain) : undefined;
+  const domain = parsed.data.platform === 'minecraft' && parsed.data.subdomain ? gateway.domainFor(parsed.data.subdomain) : undefined;
   if (domain && store.snapshot.servers.some((item) => item.domain?.toLowerCase() === domain.toLowerCase())) return reply.code(409).send({ error: 'Ce sous-domaine est déjà utilisé par un autre serveur.' });
-  if (parsed.data.modpack && !['FABRIC', 'FORGE', 'NEOFORGE'].includes(parsed.data.software)) {
+  if (parsed.data.modpack && (parsed.data.platform !== 'minecraft' || !['FABRIC', 'FORGE', 'NEOFORGE'].includes(parsed.data.software))) {
     return reply.code(400).send({ error: 'Les modpacks CurseForge nécessitent Fabric, Forge ou NeoForge.' });
+  }
+  if (parsed.data.customJar) {
+    try { if (!(await stat(path.join(jarsDir, `${parsed.data.customJar.uploadId}.jar`))).isFile()) throw new Error(); }
+    catch { return reply.code(400).send({ error: 'Le jar personnalisé n’est plus disponible. Refaites l’upload puis réessayez.' }); }
   }
   let created!: { server: MinecraftServer; job: PanelJob };
   try {
     created = await store.transaction((draft) => {
-      const candidates = draft.allocations.filter((item) => item.nodeId === node.id && !item.serverId && !item.reservationId && (!gateway.enabled || item.port !== gateway.publicPort));
-      const allocation = parsed.data.allocationId ? candidates.find((item) => item.id === parsed.data.allocationId) : parsed.data.port ? candidates.find((item) => item.port === parsed.data.port) : candidates.sort((a, b) => a.port - b.port)[0];
-      if (!allocation) throw httpError(409, 'Cette allocation est déjà utilisée, réservée, ou aucune allocation libre n’est disponible.');
+      const selectedAllocations = steamGame
+        ? pickSteamAllocations(draft.allocations, node.id, steamGame, parsed.data.allocationId, parsed.data.port)
+        : [pickFreeAllocation(draft.allocations, node.id, parsed.data.allocationId, parsed.data.port)].filter(Boolean) as Allocation[];
+      const allocation = selectedAllocations[0];
+      if (!allocation) {
+        const required = steamGame ? ` Une plage contiguë de ${steamAllocationOffsets(steamGame).length} ports est requise pour ${steamGame.name}.` : '';
+        throw httpError(409, `Cette allocation est déjà utilisée, réservée, ou aucune allocation libre n’est disponible.${required}`);
+      }
       if (domain && draft.servers.some((item) => item.domain?.toLowerCase() === domain.toLowerCase())) throw httpError(409, 'Ce sous-domaine est déjà utilisé par un autre serveur.');
+      const ports: ServerPort[] = steamGame
+        ? steamGame.ports.map((definition) => {
+          const portAllocation = selectedAllocations.find((item) => item.port === allocation.port + definition.allocationOffset)!;
+          return { name: definition.name, internalPort: definition.internalPort, hostPort: portAllocation.port, protocol: definition.protocol, allocationId: portAllocation.id };
+        })
+        : [{ name: 'Minecraft', internalPort: 25565, hostPort: allocation.port, protocol: 'tcp', allocationId: allocation.id }];
       const server: MinecraftServer = {
-        id, name: parsed.data.name, software: parsed.data.software, version: parsed.data.version,
+        id, name: parsed.data.name, platform: parsed.data.platform, software: steamGame ? 'STEAMCMD' : parsed.data.software, version: steamGame ? 'latest' : parsed.data.version,
         memoryMb: parsed.data.memoryMb, cpuPercent: parsed.data.cpuPercent, diskMb: parsed.data.diskMb,
-        port: allocation.port, nodeId: node.id, allocationId: allocation.id, ownerId: owner.id, domain,
+        port: allocation.port, ports, steam: steamGame ? { presetId: steamGame.id, gameName: steamGame.name, appId: steamGame.appId, startupCommand: steamGame.startupCommand } : undefined,
+        nodeId: node.id, allocationId: allocation.id, ownerId: owner.id, domain,
         crashPolicy: defaultCrashPolicy(), backupPolicy: defaultBackupPolicy(), createdAt: new Date().toISOString(),
       };
-      const job = makeJob('server.create', actor.id, server.id, node.id, { modpack: parsed.data.modpack });
-      job.id = jobId; allocation.serverId = server.id; draft.servers.push(server); draft.jobs.unshift(job);
-      draft.auditLogs.unshift(audit(actor.id, 'server.installing', 'server', server.id, { nodeId: node.id, ownerId: owner.id, jobId }));
+      const job = makeJob('server.create', actor.id, server.id, node.id, { modpack: parsed.data.modpack, customJar: parsed.data.customJar });
+      job.id = jobId; for (const item of selectedAllocations) item.serverId = server.id; draft.servers.push(server); draft.jobs.unshift(job);
+      draft.auditLogs.unshift(audit(actor.id, 'server.installing', 'server', server.id, { nodeId: node.id, ownerId: owner.id, jobId, platform: server.platform, steamGame: server.steam?.presetId }));
       return { server, job };
     });
   } catch (error) { return reply.code((error as { statusCode?: number }).statusCode ?? 500).send({ error: (error as Error).message }); }
@@ -708,6 +761,7 @@ app.put('/api/servers/:id', { preHandler: auth }, async (request, reply) => {
 
 app.put('/api/servers/:id/domain', { preHandler: auth }, async (request, reply) => {
   const server = authorizedServer(request, reply, (request.params as { id: string }).id, 'settings.manage'); if (!server) return;
+  if (server.platform === 'steamcmd') return reply.code(409).send({ error: 'La passerelle de domaines actuelle est réservée au protocole Minecraft.' });
   const parsed = z.object({ subdomain: z.union([z.string().trim().toLowerCase().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/), z.literal(''), z.null()]) }).safeParse(request.body);
   if (!parsed.success) return reply.code(400).send({ error: 'Sous-domaine invalide.' });
   const subdomain = parsed.data.subdomain || undefined;
@@ -1035,6 +1089,7 @@ app.put('/api/servers/:id/policies', { preHandler: auth }, async (request, reply
 
 app.post('/api/servers/:id/clone', { preHandler: auth }, async (request, reply) => {
   const source = authorizedServer(request, reply, (request.params as { id: string }).id, 'settings.manage'); if (!source) return;
+  if (source.platform === 'steamcmd') return reply.code(409).send({ error: 'Le clonage SteamCMD avec plusieurs ports sera ajouté dans une prochaine version.' });
   const parsed = z.object({ name: z.string().trim().min(2).max(40), nodeId: z.string().min(1), allocationId: z.string().optional(), port: z.number().int().min(1024).max(65535).optional() }).safeParse(request.body);
   if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message });
   const node = store.snapshot.nodes.find((item) => item.id === parsed.data.nodeId);
@@ -1057,6 +1112,7 @@ app.post('/api/servers/:id/clone', { preHandler: auth }, async (request, reply) 
 
 app.post('/api/servers/:id/transfer', { preHandler: auth }, async (request, reply) => {
   const server = authorizedServer(request, reply, (request.params as { id: string }).id, 'settings.manage'); if (!server) return;
+  if (server.platform === 'steamcmd') return reply.code(409).send({ error: 'Le transfert SteamCMD avec plusieurs ports sera ajouté dans une prochaine version.' });
   const parsed = z.object({ nodeId: z.string().min(1), allocationId: z.string().optional(), port: z.number().int().min(1024).max(65535).optional() }).safeParse(request.body);
   if (!parsed.success) return reply.code(400).send({ error: 'Destination invalide.' });
   if (parsed.data.nodeId === server.nodeId) return reply.code(409).send({ error: 'Choisissez un autre nœud.' });
@@ -1073,6 +1129,8 @@ app.post('/api/servers/:id/transfer', { preHandler: auth }, async (request, repl
 
 app.post('/api/servers/:id/upgrade', { preHandler: auth }, async (request, reply) => {
   const server = authorizedServer(request, reply, (request.params as { id: string }).id, 'settings.manage'); if (!server) return;
+  if (server.platform === 'steamcmd') return reply.code(409).send({ error: 'Les mises à jour SteamCMD sont appliquées automatiquement au démarrage.' });
+  if (server.software === 'CUSTOM') return reply.code(409).send({ error: 'Un serveur à jar personnalisé ne peut pas être mis à niveau automatiquement.' });
   const parsed = z.object({ software: z.enum(['PAPER', 'VANILLA', 'PURPUR', 'FABRIC', 'FORGE', 'NEOFORGE']), version: z.string().trim().min(1).max(30) }).safeParse(request.body);
   if (!parsed.success) return reply.code(400).send({ error: 'Version ou logiciel invalide.' });
   if ((await statusFor(server)) !== 'stopped') return reply.code(409).send({ error: 'Arrêtez le serveur avant sa mise à niveau.' });
@@ -1204,7 +1262,7 @@ app.delete('/api/servers/:id', { preHandler: auth }, async (request, reply) => {
     draft.jobs = draft.jobs.filter((item) => item.serverId !== id || item.status === 'running');
     draft.metrics = draft.metrics.filter((item) => item.serverId !== id);
     draft.crashEvents = draft.crashEvents.filter((item) => item.serverId !== id);
-    const allocation = draft.allocations.find((item) => item.serverId === id); if (allocation) allocation.serverId = undefined;
+    for (const allocation of draft.allocations) if (allocation.serverId === id) allocation.serverId = undefined;
     draft.auditLogs.unshift(audit(currentUser(request)?.id, 'server.delete', 'server', id));
   });
   await gateway.sync(store.snapshot);
@@ -1392,6 +1450,16 @@ function availableAllocations(nodeId: string) { return nodeAllocations(nodeId).f
 function allocationStats(nodeId: string) { const items = nodeAllocations(nodeId); return { total: items.length, used: items.filter((item) => item.serverId).length, reserved: items.filter((item) => item.reservationId).length, free: items.filter((item) => !item.serverId && !item.reservationId).length }; }
 function selectAllocation(nodeId: string, allocationId?: string, port?: number) { const items = availableAllocations(nodeId); return allocationId ? items.find((item) => item.id === allocationId) : port ? items.find((item) => item.port === port) : items[0]; }
 function pickFreeAllocation(allocations: Allocation[], nodeId: string, allocationId?: string, port?: number) { const items = allocations.filter((item) => item.nodeId === nodeId && !item.serverId && !item.reservationId && (!gateway.enabled || item.port !== gateway.publicPort)).sort((a, b) => a.port - b.port); return allocationId ? items.find((item) => item.id === allocationId) : port ? items.find((item) => item.port === port) : items[0]; }
+function pickSteamAllocations(allocations: Allocation[], nodeId: string, game: NonNullable<ReturnType<typeof steamGameById>>, allocationId?: string, port?: number) {
+  const available = allocations.filter((item) => item.nodeId === nodeId && !item.serverId && !item.reservationId && (!gateway.enabled || item.port !== gateway.publicPort)).sort((left, right) => left.port - right.port);
+  const requested = allocationId ? available.find((item) => item.id === allocationId) : port ? available.find((item) => item.port === port) : undefined;
+  const candidates = requested ? [requested] : available;
+  for (const candidate of candidates) {
+    const selected = steamAllocationOffsets(game).map((offset) => available.find((item) => item.ip === candidate.ip && item.port === candidate.port + offset));
+    if (selected.every((item): item is Allocation => Boolean(item))) return selected;
+  }
+  return [];
+}
 function nodeCapacity(nodeId: string) { const node = store.snapshot.nodes.find((item) => item.id === nodeId); const servers = store.snapshot.servers.filter((item) => item.nodeId === nodeId); const memoryMb = servers.reduce((total, item) => total + item.memoryMb, 0); const diskMb = servers.reduce((total, item) => total + item.diskMb, 0); return { memoryMb, diskMb, maxMemoryMb: node?.maxMemoryMb, maxDiskMb: node?.maxDiskMb, serverCount: servers.length }; }
 function checkNodeCapacity(nodeId: string, memoryMb: number, diskMb: number) { const value = nodeCapacity(nodeId); if (value.maxMemoryMb && value.memoryMb + memoryMb > value.maxMemoryMb) return `Capacité RAM du nœud dépassée (${value.memoryMb + memoryMb}/${value.maxMemoryMb} Mo).`; if (value.maxDiskMb && value.diskMb + diskMb > value.maxDiskMb) return `Capacité disque du nœud dépassée (${value.diskMb + diskMb}/${value.maxDiskMb} Mo).`; return undefined; }
 function checkUserQuota(user: UserRecord, memoryMb: number, diskMb: number) { if (user.role === 'admin') return undefined; const servers = store.snapshot.servers.filter((item) => item.ownerId === user.id); if (user.quota.maxServers >= 0 && servers.length + 1 > user.quota.maxServers) return `Quota de ${user.quota.maxServers} serveur(s) atteint.`; if (user.quota.maxMemoryMb >= 0 && servers.reduce((total, item) => total + item.memoryMb, 0) + memoryMb > user.quota.maxMemoryMb) return `Quota RAM utilisateur dépassé (${user.quota.maxMemoryMb} Mo).`; if (user.quota.maxDiskMb >= 0 && servers.reduce((total, item) => total + item.diskMb, 0) + diskMb > user.quota.maxDiskMb) return `Quota disque utilisateur dépassé (${user.quota.maxDiskMb} Mo).`; return undefined; }
@@ -1511,15 +1579,23 @@ async function executePanelJob(id: string): Promise<Record<string, unknown>> {
     const node = store.snapshot.nodes.find((item) => item.id === server.nodeId); if (!node) throw new Error('Nœud introuvable.');
     await updateJob(id, 10, 'Préparation de l’installation');
     const modpackInput = job.payload.modpack as { projectId: number; slug: string } | undefined;
+    const customJar = job.payload.customJar as { uploadId: string; filename: string } | undefined;
     const pack = modpackInput ? await resolveCurseForgeModpack(server, modpackInput.projectId, modpackInput.slug, server.version.toUpperCase() === 'LATEST' ? undefined : server.version) : undefined;
     if (pack && pack.minecraftVersion !== server.version) await store.update((draft) => { const item = draft.servers.find((entry) => entry.id === server.id); if (item) item.version = pack.minecraftVersion; });
     const current = await new NodeClient(node).state(server).catch(() => ({ status: 'missing' as const }));
-    await updateJob(id, 45, pack ? `Installation du server pack ${pack.filename}` : 'Création du conteneur Minecraft');
+    await updateJob(id, 45, pack ? `Installation du server pack ${pack.filename}` : customJar ? 'Création du conteneur avec jar personnalisé' : server.platform === 'steamcmd' ? `Installation SteamCMD de ${server.steam?.gameName ?? 'ce jeu'}` : 'Création du conteneur Minecraft');
     if (current.status === 'missing') await new NodeClient(node).create(findServer(server.id)!, pack);
+    if (customJar) {
+      const jarPath = path.join(jarsDir, `${customJar.uploadId}.jar`);
+      const jarContent = await readFile(jarPath);
+      await updateJob(id, 70, `Installation du jar personnalisé (${customJar.filename})`);
+      await new NodeClient(node).uploadFile(server, 'server.jar', jarContent);
+    }
     await new NodeClient(node).updateCrashPolicy(server, server.crashPolicy);
-    await updateJob(id, 90, 'Synchronisation de la passerelle'); await gateway.sync(store.snapshot);
-    await recordAudit(job.userId, 'server.create', 'server', server.id, { nodeId: node.id, jobId: job.id, serverPack: pack?.filename });
-    return { serverId: server.id, serverPack: pack?.filename };
+    await updateJob(id, 90, server.platform === 'minecraft' ? 'Synchronisation de la passerelle' : 'Finalisation du serveur SteamCMD'); await gateway.sync(store.snapshot);
+    if (customJar) await unlink(path.join(jarsDir, `${customJar.uploadId}.jar`)).catch(() => undefined);
+    await recordAudit(job.userId, 'server.create', 'server', server.id, { nodeId: node.id, jobId: job.id, platform: server.platform, steamAppId: server.steam?.appId, serverPack: pack?.filename, customJar: customJar?.filename });
+    return { serverId: server.id, platform: server.platform, steamAppId: server.steam?.appId, serverPack: pack?.filename };
   }
   if (job.kind === 'backup.create') {
     await updateJob(id, 15, 'Sauvegarde et compression des fichiers');

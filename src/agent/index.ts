@@ -61,16 +61,33 @@ const serverPackSchema = z.object({
 const createSchema = z.object({
   id: idSchema,
   name: z.string().min(2).max(40),
-  software: z.enum(['PAPER', 'VANILLA', 'PURPUR', 'FABRIC', 'FORGE', 'NEOFORGE']),
+  platform: z.enum(['minecraft', 'steamcmd']).default('minecraft'),
+  software: z.enum(['PAPER', 'VANILLA', 'PURPUR', 'FABRIC', 'FORGE', 'NEOFORGE', 'CUSTOM', 'STEAMCMD']),
   version: z.string().min(1).max(30),
   memoryMb: z.number().int().min(1024).max(65536),
   cpuPercent: z.number().int().min(10).max(1600),
   diskMb: z.number().int().min(1024).max(1048576),
   port: z.number().int().min(1024).max(65535),
+  ports: z.array(z.object({
+    name: z.string().min(1).max(60),
+    internalPort: z.number().int().min(1).max(65535),
+    hostPort: z.number().int().min(1024).max(65535),
+    protocol: z.enum(['tcp', 'udp']),
+    allocationId: idSchema,
+  })).min(1).max(16),
+  steam: z.object({
+    presetId: z.string().regex(/^[a-z0-9-]{2,50}$/),
+    gameName: z.string().min(2).max(80),
+    appId: z.number().int().positive(),
+    startupCommand: z.string().min(1).max(2000),
+  }).optional(),
   serverPack: serverPackSchema.optional(),
 })
-  .refine((value) => !value.serverPack || ['FABRIC', 'FORGE', 'NEOFORGE'].includes(value.software), { message: 'Les modpacks nécessitent Fabric, Forge ou NeoForge.', path: ['software'] })
-  .refine((value) => !gatewayEnabled || value.port !== gatewayPort, { message: `Le port ${gatewayPort} est réservé à la passerelle Minecraft.`, path: ['port'] });
+  .refine((value) => value.platform !== 'steamcmd' || value.software === 'STEAMCMD' && Boolean(value.steam), { message: 'Configuration SteamCMD incomplète.', path: ['steam'] })
+  .refine((value) => value.platform !== 'minecraft' || value.software !== 'STEAMCMD' && !value.steam, { message: 'Configuration Minecraft invalide.', path: ['software'] })
+  .refine((value) => !value.serverPack || value.platform === 'minecraft' && ['FABRIC', 'FORGE', 'NEOFORGE'].includes(value.software), { message: 'Les modpacks nécessitent Fabric, Forge ou NeoForge.', path: ['software'] })
+  .refine((value) => value.software !== 'CUSTOM' || !value.serverPack, { message: 'Un jar personnalisé est incompatible avec un server pack.', path: ['serverPack'] })
+  .refine((value) => !gatewayEnabled || value.ports.every((item) => item.hostPort !== gatewayPort), { message: `Le port ${gatewayPort} est réservé à la passerelle Minecraft.`, path: ['ports'] });
 
 app.get('/v1/health', async () => {
   let dockerReady = true;
@@ -152,7 +169,9 @@ app.get('/v1/servers/:id/metrics', async (request, reply) => {
   const state = await docker.state(id); const diskBytes = await docker.diskUsage(id);
   if (state.status !== 'running') return { status: state.status, cpuPercent: 0, memoryBytes: 0, memoryLimitBytes: 0, networkRxBytes: 0, networkTxBytes: 0, diskBytes };
   const stats = await docker.stats(id); let playersOnline: number | undefined; let playersMax: number | undefined;
-  try { const output = await docker.command(id, 'list'); const match = output.match(/(?:There are|Il y a)\s+(\d+)\s+(?:of a max of|sur un maximum de)\s+(\d+)/i); if (match) { playersOnline = Number(match[1]); playersMax = Number(match[2]); } } catch { /* RCON peut ne pas être encore prêt. */ }
+  if (await docker.platform(id).catch(() => 'minecraft') === 'minecraft') {
+    try { const output = await docker.command(id, 'list'); const match = output.match(/(?:There are|Il y a)\s+(\d+)\s+(?:of a max of|sur un maximum de)\s+(\d+)/i); if (match) { playersOnline = Number(match[1]); playersMax = Number(match[2]); } } catch { /* RCON peut ne pas être encore prêt. */ }
+  }
   return { status: state.status, ...stats, diskBytes, playersOnline, playersMax };
 });
 
@@ -221,7 +240,7 @@ app.post('/v1/servers/:id/backups', async (request, reply) => {
   const id = parseId(request.params, reply); if (!id) return;
   const parsed = z.object({ name: z.string().max(60).optional(), remote: z.boolean().default(false) }).safeParse(request.body ?? {});
   if (!parsed.success) return reply.code(400).send({ error: 'Nom invalide.' });
-  if (await docker.status(id) === 'running') await docker.command(id, 'save-all flush');
+  if (await docker.status(id) === 'running' && await docker.platform(id) === 'minecraft') await docker.command(id, 'save-all flush');
   const backup = await files.createBackup(id, parsed.data.name);
   if (parsed.data.remote) { const opened = await files.openBackup(id, backup.id); await objectStore.upload(id, backup.id, opened.stream, opened.size, opened.checksum); }
   return reply.code(201).send({ ...backup, local: true, remote: parsed.data.remote });

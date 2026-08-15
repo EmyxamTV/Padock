@@ -239,6 +239,7 @@ PADOCK_BACKUPS_DIR=/var/lib/padock/backups
 PADOCK_SFTP_PUBLIC_HOST=sftp.example.com
 PADOCK_SFTP_PUBLIC_PORT=2022
 PADOCK_MINECRAFT_IMAGE=itzg/minecraft-server:java25
+PADOCK_STEAMCMD_IMAGE=steamcmd/steamcmd:ubuntu-22
 DOCKER_GID=999
 
 CURSEFORGE_API_KEY='VOTRE_CLE_CURSEFORGE'
@@ -279,6 +280,8 @@ Remplacez :
 - `999` par le résultat de `stat -c '%g' /var/run/docker.sock` ;
 - les quatre secrets par les valeurs générées ;
 - la clé CurseForge, ou laissez `CURSEFORGE_API_KEY=''` pour désactiver le catalogue.
+
+Conservez `PADOCK_STEAMCMD_IMAGE=steamcmd/steamcmd:ubuntu-22` sauf si vous avez validé une autre image compatible. La première création d’un jeu Steam télécharge l’image et les fichiers du serveur ; elle peut donc prendre plusieurs minutes.
 
 Ne terminez pas `PADOCK_PUBLIC_URL` par `/`. L’hôte SFTP doit être un nom DNS ou une IP joignable par les utilisateurs, sans `sftp://` et sans numéro de port.
 
@@ -696,6 +699,21 @@ Ouvrez **Opérations** dans Padock :
 
 Après un redémarrage du panel, les tâches persistantes inachevées sont récupérées. Ne créez pas plusieurs fois le même serveur pendant qu’une tâche est encore active.
 
+### Créer un serveur avec SteamCMD
+
+Dans **Nœuds → Modifier → Allocations réseau**, ajoutez d’abord une plage contiguë de ports. Dans la création d’un serveur, choisissez **SteamCMD**, puis Rust, Garry's Mod ou 7 Days to Die. Padock réserve automatiquement toutes les allocations requises, télécharge les fichiers avec SteamCMD et applique les mises à jour à chaque démarrage.
+
+Les domaines Minecraft de Gate ne peuvent pas transporter les protocoles des jeux Steam. Les joueurs utilisent donc l’IP ou le DNS du nœud avec le premier port affiché dans **Configuration → Installation SteamCMD**.
+
+Ouvrez dans le pare-feu Linux et celui de l’hébergeur les ports réellement attribués, avec les protocoles indiqués par Padock. Exemple avec une plage `30000–30100` :
+
+```bash
+sudo ufw allow 30000:30100/tcp
+sudo ufw allow 30000:30100/udp
+```
+
+Vous pouvez ouvrir une plage plus petite si vous ne souhaitez pas rendre toutes les allocations accessibles. Ne publiez jamais l’API de l’agent (`3001`) sur Internet.
+
 ### SMTP ou S3 ne fonctionne pas
 
 Pour SMTP, contrôlez le couple port/`PADOCK_SMTP_SECURE`, les identifiants et l’adresse d’expéditeur autorisée. Pour S3, vérifiez l’endpoint, la région, le bucket, les droits de lecture/écriture/suppression et `PADOCK_S3_FORCE_PATH_STYLE` pour MinIO. Après toute modification des variables, redéployez le Compose.
@@ -713,6 +731,7 @@ Le port hôte `25565` est réservé à Gate. Arrêtez l’ancienne instance avan
 - [ ] Les dossiers `/var/lib/padock/servers` et `backups` existent.
 - [ ] Les quatre services sont en ligne.
 - [ ] Le domaine Dokploy cible `padock:3000` avec HTTPS.
+- [ ] Les ports TCP/UDP attribués aux serveurs SteamCMD sont ouverts si cette plateforme est utilisée.
 - [ ] Les ports 80, 443 et 25565/TCP sont ouverts.
 - [ ] Les ports internes Minecraft ne sont pas ouverts publiquement.
 - [ ] Le nœud principal est en ligne dans Padock.

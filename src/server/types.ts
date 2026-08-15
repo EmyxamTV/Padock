@@ -1,8 +1,26 @@
-export type ServerSoftware = 'PAPER' | 'VANILLA' | 'PURPUR' | 'FABRIC' | 'FORGE' | 'NEOFORGE';
+export type ServerSoftware = 'PAPER' | 'VANILLA' | 'PURPUR' | 'FABRIC' | 'FORGE' | 'NEOFORGE' | 'CUSTOM' | 'STEAMCMD';
+export type ServerPlatform = 'minecraft' | 'steamcmd';
+export type ServerPortProtocol = 'tcp' | 'udp';
+
+export interface ServerPort {
+  name: string;
+  internalPort: number;
+  hostPort: number;
+  protocol: ServerPortProtocol;
+  allocationId: string;
+}
+
+export interface SteamServerConfig {
+  presetId: string;
+  gameName: string;
+  appId: number;
+  startupCommand: string;
+}
 
 export interface MinecraftServer {
   id: string;
   name: string;
+  platform: ServerPlatform;
   software: ServerSoftware;
   version: string;
   memoryMb: number;
@@ -13,6 +31,8 @@ export interface MinecraftServer {
   allocationId: string;
   ownerId: string;
   domain?: string;
+  ports: ServerPort[];
+  steam?: SteamServerConfig;
   crashPolicy: CrashPolicy;
   backupPolicy: BackupPolicy;
   createdAt: string;

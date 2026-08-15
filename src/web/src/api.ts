@@ -1,7 +1,8 @@
 export interface Server {
   id: string;
   name: string;
-  software: 'PAPER' | 'VANILLA' | 'PURPUR' | 'FABRIC' | 'FORGE' | 'NEOFORGE';
+  platform: 'minecraft' | 'steamcmd';
+  software: 'PAPER' | 'VANILLA' | 'PURPUR' | 'FABRIC' | 'FORGE' | 'NEOFORGE' | 'CUSTOM' | 'STEAMCMD';
   version: string;
   memoryMb: number;
   cpuPercent: number;
@@ -9,6 +10,8 @@ export interface Server {
   port: number;
   address?: string;
   domain?: string;
+  ports: Array<{ name: string; internalPort: number; hostPort: number; protocol: 'tcp' | 'udp'; allocationId: string }>;
+  steam?: { presetId: string; gameName: string; appId: number; startupCommand: string };
   allocationId: string;
   ownerId: string;
   nodeId: string;
@@ -28,6 +31,17 @@ export interface Server {
     error?: string;
   };
   createdAt: string;
+}
+
+export interface SteamGamePreset {
+  id: string;
+  name: string;
+  description: string;
+  appId: number;
+  ports: Array<{ name: string; internalPort: number; allocationOffset: number; protocol: 'tcp' | 'udp' }>;
+  requiredAllocations: number;
+  recommendedMemoryMb: number;
+  recommendedDiskMb: number;
 }
 
 export interface GatewayStatus {
@@ -294,9 +308,9 @@ export async function api<T>(url: string, options?: RequestInit): Promise<T> {
   return body as T;
 }
 
-export async function upload(url: string, file: File) {
+export async function upload<T = { ok: true }>(url: string, file: File) {
   const response = await fetch(url, { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/octet-stream' }, body: file });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error ?? `Erreur HTTP ${response.status}`);
-  return body as { ok: true };
+  return body as T;
 }

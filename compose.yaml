@@ -53,6 +53,7 @@ services:
       PADOCK_SERVERS_DIR: /var/lib/padock/servers
       PADOCK_BACKUPS_DIR: /var/lib/padock/backups
       PADOCK_MINECRAFT_IMAGE: ${PADOCK_MINECRAFT_IMAGE:-${PANELMC_MINECRAFT_IMAGE:-itzg/minecraft-server:java25}}
+      PADOCK_STEAMCMD_IMAGE: ${PADOCK_STEAMCMD_IMAGE:-steamcmd/steamcmd:ubuntu-22}
       CURSEFORGE_API_KEY: ${CURSEFORGE_API_KEY:-}
       PADOCK_S3_ENDPOINT: ${PADOCK_S3_ENDPOINT:-}
       PADOCK_S3_REGION: ${PADOCK_S3_REGION:-auto}

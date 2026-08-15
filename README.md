@@ -1,6 +1,6 @@
 # Padock
 
-Padock est un panel d'hébergement Minecraft inspiré de l'architecture de Pterodactyl. Le Panel central gère les comptes et les instances, tandis qu'un agent léger installé sur chaque nœud Linux contrôle Docker, les processus et les fichiers.
+Padock est un panel d'hébergement de serveurs de jeu inspiré de l'architecture de Pterodactyl. Le Panel central gère les comptes et les instances, tandis qu'un agent léger installé sur chaque nœud Linux contrôle Docker, les processus et les fichiers.
 
 ## État actuel
 
@@ -40,6 +40,9 @@ Padock est un panel d'hébergement Minecraft inspiré de l'architecture de Ptero
 - vue des nœuds avec CPU, mémoire et état Docker ;
 - modification des nœuds, vérification des nouvelles connexions d’agent et gestion des allocations libres ;
 - création de serveurs Paper, Vanilla, Purpur, Fabric, Forge et NeoForge ;
+- création de serveurs SteamCMD Rust, Garry's Mod et 7 Days to Die ;
+- téléchargement initial, vérification et mise à jour automatique des fichiers Steam au démarrage ;
+- réservation atomique des plages de ports TCP/UDP nécessaires à chaque jeu ;
 - choix du nœud, de la version, de la RAM et d’une allocation réseau libre appartenant à la plage configurée ;
 - allocations IP/ports et quotas mémoire, CPU et disque ;
 - démarrage, arrêt, redémarrage, console en direct et commandes RCON ;
@@ -78,6 +81,7 @@ PADOCK_SERVERS_DIR=/var/lib/padock/servers
 PADOCK_BACKUPS_DIR=/var/lib/padock/backups
 PADOCK_SFTP_PUBLIC_HOST=sftp.example.com
 PADOCK_SFTP_PUBLIC_PORT=2022
+PADOCK_STEAMCMD_IMAGE=steamcmd/steamcmd:ubuntu-22
 CURSEFORGE_API_KEY='$votre-cle-curseforge'
 ```
 
@@ -96,6 +100,8 @@ La clé CurseForge se crée dans la [console développeur CurseForge](https://co
 Lorsqu’un modpack est choisi pendant la création, Padock récupère le `serverPackFileId` du fichier compatible, télécharge le server pack officiel, vérifie son empreinte SHA-1 ou MD5, puis prépare le conteneur avec `GENERIC_PACK`. Pour un serveur existant, Padock crée d’abord une sauvegarde avant de le reconfigurer. Le monde n’est pas supprimé.
 
 Un projet sans server pack ZIP est refusé proprement. Padock ne retombe pas sur le pack client. L’archive serveur reste stockée dans `.padock/server-packs` dans les données du serveur et est appliquée au premier démarrage.
+
+Pour SteamCMD, choisissez la plateforme **SteamCMD** dans la création puis un jeu pris en charge. Padock ne permet pas d’injecter une commande arbitraire : chaque jeu utilise un profil contrôlé avec son App ID, sa commande de démarrage et ses ports. Le nœud doit posséder une plage d’allocations contiguës suffisamment grande. Les fichiers sont conservés dans le même dossier persistant que les serveurs Minecraft.
 
 ## Déploiement avec Dokploy et domaines Minecraft
 
@@ -125,7 +131,7 @@ PADOCK_GATEWAY_DOMAIN=mc.example.com
 PADOCK_GATEWAY_DNS_TARGET=IP_DU_SERVEUR_DOKPLOY
 ```
 
-Ouvrez les ports TCP `80`, `443` et `25565` sur le pare-feu. Le port `2022` est nécessaire uniquement pour le SFTP. Il ne faut pas ouvrir la plage des ports internes Minecraft : lorsque la passerelle est active, l’agent les lie à `127.0.0.1` et seul Gate y accède.
+Ouvrez les ports TCP `80`, `443` et `25565` sur le pare-feu. Le port `2022` est nécessaire uniquement pour le SFTP. Il ne faut pas ouvrir la plage des ports internes Minecraft : lorsque la passerelle est active, l’agent les lie à `127.0.0.1` et seul Gate y accède. Pour un serveur SteamCMD, ouvrez en revanche les allocations externes choisies dans Padock avec les protocoles TCP/UDP affichés dans sa configuration.
 
 Dans la modale de création, Padock propose automatiquement un sous-domaine dérivé du nom. Par exemple, `Survie entre amis` devient `survie-entre-amis.mc.example.com`. Gate recharge le routage à chaud lors d’une création, modification ou suppression. Les joueurs utilisent cette adresse sans ajouter de port et aucun enregistrement DNS individuel n’est nécessaire grâce au wildcard.
 
@@ -147,6 +153,6 @@ Services disponibles : interface `5173`, Panel `3000`, agent `3001`.
 
 ## Sécurité
 
-Seul l'agent monte `/var/run/docker.sock`. Le Panel n'a aucun accès direct à Docker. Pour un nœud distant, exposez son API uniquement en HTTPS et limitez l'accès réseau à l'adresse du Panel. Les jetons de nœuds et secrets TOTP sont chiffrés en AES-256-GCM avec `PADOCK_ENCRYPTION_KEY` et ne sont jamais retournés à l'interface Web. Les mots de passe SFTP sont stockés sous forme d’empreinte, chaque compte reste enfermé dans le dossier de son serveur et l’agent applique sa liste de dossiers autorisés ainsi que le mode lecture seule. En mode Dokploy, Gate est le seul service de jeu exposé publiquement ; les ports des backends restent sur la boucle locale.
+Seul l'agent monte `/var/run/docker.sock`. Le Panel n'a aucun accès direct à Docker. Pour un nœud distant, exposez son API uniquement en HTTPS et limitez l'accès réseau à l'adresse du Panel. Les jetons de nœuds et secrets TOTP sont chiffrés en AES-256-GCM avec `PADOCK_ENCRYPTION_KEY` et ne sont jamais retournés à l'interface Web. Les mots de passe SFTP sont stockés sous forme d’empreinte, chaque compte reste enfermé dans le dossier de son serveur et l’agent applique sa liste de dossiers autorisés ainsi que le mode lecture seule. En mode Dokploy, les backends Minecraft restent sur la boucle locale derrière Gate ; seuls les ports explicitement alloués aux jeux SteamCMD doivent être exposés publiquement.
 
 La suppression d'une instance retire son conteneur, mais conserve volontairement le monde sur le nœud.

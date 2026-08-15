@@ -4,8 +4,36 @@ import Docker from 'dockerode';
 import { padockEnv } from './config.js';
 
 const IMAGE = padockEnv('MINECRAFT_IMAGE') ?? 'itzg/minecraft-server:java25';
+const STEAMCMD_IMAGE = padockEnv('STEAMCMD_IMAGE') ?? 'steamcmd/steamcmd:ubuntu-22';
 const GATEWAY_ENABLED = padockEnv('GATEWAY_ENABLED') === 'true';
 const GATEWAY_BACKEND_BIND = padockEnv('GATEWAY_BACKEND_BIND')?.trim() || '127.0.0.1';
+
+interface DockerServerPort {
+  name: string;
+  internalPort: number;
+  hostPort: number;
+  protocol: 'tcp' | 'udp';
+  allocationId: string;
+}
+
+interface DockerServerInput {
+  id: string;
+  name: string;
+  platform: 'minecraft' | 'steamcmd';
+  software: string;
+  version: string;
+  memoryMb: number;
+  cpuPercent: number;
+  diskMb: number;
+  port: number;
+  ports: DockerServerPort[];
+  steam?: {
+    presetId: string;
+    gameName: string;
+    appId: number;
+    startupCommand: string;
+  };
+}
 
 export type ServerStatus = 'running' | 'stopped' | 'missing' | 'starting';
 export interface ServerState {
@@ -23,7 +51,7 @@ export interface NetworkCounterSample { rxBytes: number; txBytes: number; measur
 
 export class NodeDocker {
   readonly docker = new Docker({ socketPath: process.env.DOCKER_SOCKET ?? (process.platform === 'win32' ? '//./pipe/docker_engine' : '/var/run/docker.sock') });
-  private imageReady?: Promise<void>;
+  private readonly imageReady = new Map<string, Promise<void>>();
   private readonly diskUsageCache = new Map<string, { bytes: number; expiresAt: number }>();
   private readonly networkCounters = new Map<string, NetworkCounterSample>();
 
@@ -33,17 +61,18 @@ export class NodeDocker {
     await this.docker.ping();
   }
 
-  async create(input: { id: string; name: string; software: string; version: string; memoryMb: number; cpuPercent: number; diskMb: number; port: number }, serverPack?: { relativePath: string; projectId: number; fileId: number; filename: string }) {
+  async create(input: DockerServerInput, serverPack?: { relativePath: string; projectId: number; fileId: number; filename: string }) {
     const serverDir = path.join(this.dataDir, input.id);
-    const genericPack = serverPack ? containerPackPath(serverPack.relativePath) : undefined;
     await mkdir(serverDir, { recursive: true });
-    await this.ensureImage();
+    if (input.platform === 'steamcmd') return await this.createSteamServer(input, serverDir);
+    const genericPack = serverPack ? containerPackPath(serverPack.relativePath) : undefined;
+    await this.ensureImage(IMAGE);
     const env = [
       'EULA=TRUE', `TYPE=${input.software}`, `VERSION=${input.version}`, ...javaMemoryEnvironment(input.memoryMb),
       'ENABLE_RCON=true', 'ONLINE_MODE=true', 'USE_AIKAR_FLAGS=true',
     ];
     if (genericPack) env.push(`GENERIC_PACK=${genericPack}`, 'USE_MODPACK_START_SCRIPT=true');
-    const labels: Record<string, string> = { 'padock.managed': 'true', 'padock.server-id': input.id, 'padock.server-name': input.name, 'padock.memory-mb': String(input.memoryMb), 'padock.disk-mb': String(input.diskMb), 'padock.cpu-percent': String(input.cpuPercent) };
+    const labels: Record<string, string> = { 'padock.managed': 'true', 'padock.platform': 'minecraft', 'padock.server-id': input.id, 'padock.server-name': input.name, 'padock.memory-mb': String(input.memoryMb), 'padock.disk-mb': String(input.diskMb), 'padock.cpu-percent': String(input.cpuPercent) };
     if (serverPack) {
       labels['padock.modpack-provider'] = 'curseforge';
       labels['padock.modpack-mode'] = 'server-pack';
@@ -67,6 +96,87 @@ export class NodeDocker {
       },
     });
     return container.id;
+  }
+
+  private async createSteamServer(input: DockerServerInput, serverDir: string) {
+    if (!input.steam || !input.ports.length) throw Object.assign(new Error('Configuration SteamCMD incomplète.'), { statusCode: 400 });
+    await this.ensureImage(STEAMCMD_IMAGE);
+    await this.installSteamApp(input, serverDir);
+
+    const exposedPorts: Record<string, object> = {};
+    const portBindings: Record<string, Array<{ HostPort: string }>> = {};
+    for (const port of input.ports) {
+      const key = `${port.internalPort}/${port.protocol}`;
+      exposedPorts[key] = {};
+      portBindings[key] = [{ HostPort: String(port.hostPort) }];
+    }
+    const uniqueInternalPorts = [...new Set(input.ports.map((port) => port.internalPort))];
+    const labels: Record<string, string> = {
+      'padock.managed': 'true',
+      'padock.platform': 'steamcmd',
+      'padock.server-id': input.id,
+      'padock.server-name': input.name,
+      'padock.steam-preset': input.steam.presetId,
+      'padock.steam-app-id': String(input.steam.appId),
+      'padock.memory-mb': String(input.memoryMb),
+      'padock.disk-mb': String(input.diskMb),
+      'padock.cpu-percent': String(input.cpuPercent),
+    };
+    const env = [
+      `STEAM_APP_ID=${input.steam.appId}`,
+      `PADOCK_SERVER_NAME=${input.name}`,
+      `PADOCK_STARTUP_COMMAND=${input.steam.startupCommand}`,
+      `PADOCK_GAME_PORT=${uniqueInternalPorts[0]}`,
+      `PADOCK_QUERY_PORT=${uniqueInternalPorts[1] ?? uniqueInternalPorts[0]}`,
+    ];
+    const command = [
+      'set -e',
+      'mkdir -p /data/server',
+      '/usr/bin/steamcmd +force_install_dir /data/server +login anonymous +app_update "$STEAM_APP_ID" +quit',
+      'cd /data/server',
+      'exec /bin/bash -lc "$PADOCK_STARTUP_COMMAND"',
+    ].join('\n');
+    const container = await this.docker.createContainer({
+      name: this.containerName(input.id),
+      Image: STEAMCMD_IMAGE,
+      Entrypoint: ['/bin/bash', '-lc'],
+      Cmd: [command],
+      Env: env,
+      Labels: labels,
+      WorkingDir: '/data/server',
+      OpenStdin: true,
+      StdinOnce: false,
+      Tty: true,
+      ExposedPorts: exposedPorts,
+      HostConfig: {
+        Binds: [`${serverDir}:/data`],
+        PortBindings: portBindings,
+        RestartPolicy: { Name: 'unless-stopped' },
+        Memory: input.memoryMb * 1024 * 1024,
+        MemorySwap: input.memoryMb * 1024 * 1024,
+        NanoCpus: Math.round(input.cpuPercent / 100 * 1_000_000_000),
+      },
+    });
+    return container.id;
+  }
+
+  private async installSteamApp(input: DockerServerInput, serverDir: string) {
+    const installer = await this.docker.createContainer({
+      name: `padock-install-${input.id}-${Date.now()}`,
+      Image: STEAMCMD_IMAGE,
+      Cmd: ['+force_install_dir', '/data/server', '+login', 'anonymous', '+app_update', String(input.steam!.appId), 'validate', '+quit'],
+      HostConfig: { Binds: [`${serverDir}:/data`] },
+    });
+    try {
+      await installer.start();
+      const result = await installer.wait();
+      if (result.StatusCode !== 0) {
+        const logs = await installer.logs({ stdout: true, stderr: true, tail: 80 });
+        throw Object.assign(new Error(`SteamCMD a échoué pour l’App ID ${input.steam!.appId} (code ${result.StatusCode}).\n${logs.toString().slice(-4000)}`), { statusCode: 502 });
+      }
+    } finally {
+      await installer.remove({ force: true }).catch(() => undefined);
+    }
   }
 
   async status(id: string): Promise<ServerStatus> {
@@ -123,8 +233,9 @@ export class NodeDocker {
     const container = await this.container(id);
     const info = await container.inspect();
     const originalEnv = info.Config.Env ?? [];
-    const env = originalEnv.filter((entry) => !['MEMORY=', 'INIT_MEMORY=', 'MAX_MEMORY='].some((prefix) => entry.startsWith(prefix)))
-      .concat(javaMemoryEnvironment(input.memoryMb));
+    const env = readLabel(info.Config.Labels, 'platform') === 'steamcmd'
+      ? originalEnv
+      : originalEnv.filter((entry) => !['MEMORY=', 'INIT_MEMORY=', 'MAX_MEMORY='].some((prefix) => entry.startsWith(prefix))).concat(javaMemoryEnvironment(input.memoryMb));
     const labels: Record<string, string> = {
       ...info.Config.Labels,
       'padock.memory-mb': String(input.memoryMb),
@@ -143,7 +254,7 @@ export class NodeDocker {
     await (await this.container(id)).update({ RestartPolicy: input.enabled ? { Name: 'on-failure', MaximumRetryCount: input.maxRestarts } : { Name: 'no', MaximumRetryCount: 0 } });
   }
 
-  async repair(input: { id: string; name: string; software: string; version: string; memoryMb: number; cpuPercent: number; diskMb: number; port: number }) {
+  async repair(input: DockerServerInput) {
     const current = await this.state(input.id);
     if (current.status === 'running' || current.status === 'starting') {
       throw Object.assign(new Error('Arrêtez le serveur avant de réparer son conteneur.'), { statusCode: 409 });
@@ -151,6 +262,12 @@ export class NodeDocker {
     if (current.status === 'missing') {
       const serverPack = await existingServerPack(this.dataDir, input.id);
       await this.create(input, serverPack);
+      return;
+    }
+
+    if (input.platform === 'steamcmd') {
+      await (await this.container(input.id)).remove({ force: true });
+      await this.create(input);
       return;
     }
 
@@ -202,7 +319,15 @@ export class NodeDocker {
   }
 
   async command(id: string, command: string) {
-    const exec = await (await this.container(id)).exec({ Cmd: ['rcon-cli', command], AttachStdout: true, AttachStderr: true });
+    const container = await this.container(id);
+    const info = await container.inspect();
+    if (readLabel(info.Config.Labels, 'platform') === 'steamcmd') {
+      const stream = await container.attach({ stream: true, stdin: true, stdout: false, stderr: false, hijack: true });
+      stream.write(`${command}\n`);
+      stream.end();
+      return 'Commande envoyée à l’entrée standard du serveur.';
+    }
+    const exec = await container.exec({ Cmd: ['rcon-cli', command], AttachStdout: true, AttachStderr: true });
     const stream = await exec.start({ hijack: true });
     return await new Promise<string>((resolve, reject) => {
       let output = '';
@@ -214,6 +339,11 @@ export class NodeDocker {
 
   async logs(id: string, tail: number) {
     return (await this.container(id)).logs({ follow: true, stdout: true, stderr: true, timestamps: false, tail });
+  }
+
+  async platform(id: string) {
+    const info = await (await this.container(id)).inspect();
+    return readLabel(info.Config.Labels, 'platform') === 'steamcmd' ? 'steamcmd' as const : 'minecraft' as const;
   }
 
   async stats(id: string) {
@@ -271,7 +401,7 @@ export class NodeDocker {
   private async recreate(info: Docker.ContainerInspectInfo, env: string[], labels: Record<string, string>, memoryMb?: number, cpuPercent?: number) {
     const memoryBytes = memoryMb ? memoryMb * 1024 * 1024 : info.HostConfig.Memory;
     const originalPortBindings = info.HostConfig.PortBindings as Record<string, Array<{ HostIp?: string; HostPort?: string }> | null> | undefined;
-    const portBindings = GATEWAY_ENABLED
+    const portBindings = GATEWAY_ENABLED && readLabel(labels, 'platform') !== 'steamcmd'
       ? Object.fromEntries(Object.entries(originalPortBindings ?? {}).map(([key, bindings]) => [key, bindings?.map((binding) => ({ ...binding, HostIp: GATEWAY_BACKEND_BIND })) ?? []]))
       : info.HostConfig.PortBindings;
     await this.docker.createContainer({
@@ -283,6 +413,9 @@ export class NodeDocker {
       Cmd: info.Config.Cmd,
       Entrypoint: info.Config.Entrypoint,
       WorkingDir: info.Config.WorkingDir,
+      OpenStdin: info.Config.OpenStdin,
+      StdinOnce: info.Config.StdinOnce,
+      Tty: info.Config.Tty,
       HostConfig: {
         Binds: info.HostConfig.Binds,
         PortBindings: portBindings,
@@ -294,18 +427,20 @@ export class NodeDocker {
     });
   }
 
-  private async ensureImage() {
-    if (this.imageReady) return this.imageReady;
-    this.imageReady = this.prepareImage();
-    try { await this.imageReady; }
-    catch (error) { this.imageReady = undefined; throw error; }
+  private async ensureImage(image: string) {
+    const current = this.imageReady.get(image);
+    if (current) return current;
+    const pending = this.prepareImage(image);
+    this.imageReady.set(image, pending);
+    try { await pending; }
+    catch (error) { this.imageReady.delete(image); throw error; }
   }
 
-  private async prepareImage() {
-    try { await this.docker.getImage(IMAGE).inspect(); }
+  private async prepareImage(image: string) {
+    try { await this.docker.getImage(image).inspect(); }
     catch (error) {
       if ((error as { statusCode?: number }).statusCode !== 404) throw error;
-      const stream = await this.docker.pull(IMAGE);
+      const stream = await this.docker.pull(image);
       await new Promise<void>((resolve, reject) => this.docker.modem.followProgress(stream, (err) => err ? reject(err) : resolve()));
     }
   }

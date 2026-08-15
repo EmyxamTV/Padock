@@ -139,14 +139,19 @@ export class Store {
         owner_id text NOT NULL REFERENCES users(id), domain text, created_at timestamptz NOT NULL
       );
       ALTER TABLE servers ADD COLUMN IF NOT EXISTS domain text;
+      ALTER TABLE servers ADD COLUMN IF NOT EXISTS platform text NOT NULL DEFAULT 'minecraft';
+      ALTER TABLE servers ADD COLUMN IF NOT EXISTS ports jsonb NOT NULL DEFAULT '[]';
+      ALTER TABLE servers ADD COLUMN IF NOT EXISTS steam_config jsonb;
       ALTER TABLE servers ADD COLUMN IF NOT EXISTS crash_policy jsonb NOT NULL DEFAULT '{"enabled":true,"maxRestarts":3,"windowMinutes":10,"cooldownMinutes":30}';
       ALTER TABLE servers ADD COLUMN IF NOT EXISTS backup_policy jsonb NOT NULL DEFAULT '{"retention":5,"remoteEnabled":false}';
       CREATE TABLE IF NOT EXISTS allocations (
         id text PRIMARY KEY, node_id text NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, ip text NOT NULL,
-        port integer NOT NULL, alias text, server_id text UNIQUE REFERENCES servers(id) ON DELETE SET NULL, reservation_id text,
+        port integer NOT NULL, alias text, server_id text REFERENCES servers(id) ON DELETE SET NULL, reservation_id text,
         UNIQUE(node_id, ip, port)
       );
+      ALTER TABLE allocations DROP CONSTRAINT IF EXISTS allocations_server_id_key;
       ALTER TABLE allocations ADD COLUMN IF NOT EXISTS reservation_id text;
+      CREATE INDEX IF NOT EXISTS allocations_server_idx ON allocations(server_id);
       CREATE TABLE IF NOT EXISTS server_access (
         server_id text NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
         user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -250,7 +255,7 @@ export class Store {
       groups: groups.rows.map((row) => ({ id: row.id, name: row.name, description: row.description, permissions: row.permissions ?? [], serverPermissions: row.server_permissions ?? [], createdAt: date(row.created_at), updatedAt: date(row.updated_at) })) as UserGroup[],
       roles: roles.rows.map((row) => ({ id: row.id, name: row.name, description: row.description, permissions: row.permissions ?? [], createdAt: date(row.created_at), updatedAt: date(row.updated_at) })) as PanelRole[],
       nodes: nodes.rows.map((row) => ({ id: row.id, name: row.name, location: row.location, url: row.url, token: decryptSecret(row.token)!, maintenance: row.maintenance ?? false, maintenanceMessage: row.maintenance_message ?? undefined, maxMemoryMb: row.max_memory_mb ?? undefined, maxDiskMb: row.max_disk_mb ?? undefined, createdAt: date(row.created_at) })) as NodeRecord[],
-      servers: servers.rows.map((row) => ({ id: row.id, name: row.name, software: row.software, version: row.version, memoryMb: row.memory_mb, cpuPercent: row.cpu_percent, diskMb: row.disk_mb, port: row.port, nodeId: row.node_id, allocationId: row.allocation_id, ownerId: row.owner_id, domain: row.domain ?? undefined, crashPolicy: row.crash_policy ?? defaultCrashPolicy(), backupPolicy: row.backup_policy ?? defaultBackupPolicy(), createdAt: date(row.created_at) })) as MinecraftServer[],
+      servers: servers.rows.map((row) => ({ id: row.id, name: row.name, platform: row.platform ?? 'minecraft', software: row.software, version: row.version, memoryMb: row.memory_mb, cpuPercent: row.cpu_percent, diskMb: row.disk_mb, port: row.port, ports: row.ports?.length ? row.ports : [{ name: 'Minecraft', internalPort: 25565, hostPort: row.port, protocol: 'tcp', allocationId: row.allocation_id }], steam: row.steam_config ?? undefined, nodeId: row.node_id, allocationId: row.allocation_id, ownerId: row.owner_id, domain: row.domain ?? undefined, crashPolicy: row.crash_policy ?? defaultCrashPolicy(), backupPolicy: row.backup_policy ?? defaultBackupPolicy(), createdAt: date(row.created_at) })) as MinecraftServer[],
       allocations: allocations.rows.map((row) => ({ id: row.id, nodeId: row.node_id, ip: row.ip, port: row.port, alias: row.alias ?? undefined, serverId: row.server_id ?? undefined, reservationId: row.reservation_id ?? undefined })) as Allocation[],
       serverAccess: access.rows.map((row) => ({ serverId: row.server_id, userId: row.user_id, permissions: row.permissions })) as ServerAccess[],
       schedules: schedules.rows.map((row) => ({ id: row.id, serverId: row.server_id, name: row.name, intervalMinutes: row.interval_minutes, action: row.action, payload: row.payload ?? undefined, enabled: row.enabled, nextRunAt: date(row.next_run_at), lastRunAt: row.last_run_at ? date(row.last_run_at) : undefined, lastStatus: row.last_status ?? undefined, createdAt: date(row.created_at) })) as ServerSchedule[],
@@ -284,8 +289,8 @@ export class Store {
         `INSERT INTO nodes (id,name,location,url,token,maintenance,maintenance_message,max_memory_mb,max_disk_mb,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO UPDATE SET name=$2,location=$3,url=$4,token=$5,maintenance=$6,maintenance_message=$7,max_memory_mb=$8,max_disk_mb=$9`,
         [node.id, node.name, node.location, node.url, encryptSecret(node.token), node.maintenance, node.maintenanceMessage ?? null, node.maxMemoryMb ?? null, node.maxDiskMb ?? null, node.createdAt]);
       for (const server of this.state.servers) await client.query(
-        `INSERT INTO servers (id,name,software,version,memory_mb,cpu_percent,disk_mb,port,node_id,allocation_id,owner_id,domain,crash_policy,backup_policy,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT (id) DO UPDATE SET name=$2,software=$3,version=$4,memory_mb=$5,cpu_percent=$6,disk_mb=$7,port=$8,node_id=$9,allocation_id=$10,owner_id=$11,domain=$12,crash_policy=$13,backup_policy=$14`,
-        [server.id, server.name, server.software, server.version, server.memoryMb, server.cpuPercent, server.diskMb, server.port, server.nodeId, server.allocationId, server.ownerId, server.domain ?? null, JSON.stringify(server.crashPolicy), JSON.stringify(server.backupPolicy), server.createdAt]);
+        `INSERT INTO servers (id,name,software,version,memory_mb,cpu_percent,disk_mb,port,node_id,allocation_id,owner_id,domain,crash_policy,backup_policy,created_at,platform,ports,steam_config) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) ON CONFLICT (id) DO UPDATE SET name=$2,software=$3,version=$4,memory_mb=$5,cpu_percent=$6,disk_mb=$7,port=$8,node_id=$9,allocation_id=$10,owner_id=$11,domain=$12,crash_policy=$13,backup_policy=$14,platform=$16,ports=$17,steam_config=$18`,
+        [server.id, server.name, server.software, server.version, server.memoryMb, server.cpuPercent, server.diskMb, server.port, server.nodeId, server.allocationId, server.ownerId, server.domain ?? null, JSON.stringify(server.crashPolicy), JSON.stringify(server.backupPolicy), server.createdAt, server.platform, JSON.stringify(server.ports), server.steam ? JSON.stringify(server.steam) : null]);
       for (const allocation of this.state.allocations) await client.query(
         `INSERT INTO allocations (id,node_id,ip,port,alias,server_id,reservation_id) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO UPDATE SET node_id=$2,ip=$3,port=$4,alias=$5,server_id=$6,reservation_id=$7`,
         [allocation.id, allocation.nodeId, allocation.ip, allocation.port, allocation.alias ?? null, allocation.serverId ?? null, allocation.reservationId ?? null]);
@@ -375,6 +380,8 @@ function normalize(raw: Partial<PanelState>): PanelState {
   const servers = (raw.servers ?? []).map((server) => ({
     ...server, nodeId: server.nodeId ?? nodes[0]?.id ?? 'local001', ownerId: server.ownerId ?? ownerId,
     allocationId: server.allocationId ?? `legacy-${server.id}`, cpuPercent: server.cpuPercent ?? 100, diskMb: server.diskMb ?? 10240,
+    platform: server.platform ?? 'minecraft',
+    ports: server.ports?.length ? server.ports : [{ name: 'Minecraft', internalPort: 25565, hostPort: server.port, protocol: 'tcp' as const, allocationId: server.allocationId ?? `legacy-${server.id}` }],
     crashPolicy: server.crashPolicy ?? defaultCrashPolicy(), backupPolicy: server.backupPolicy ?? defaultBackupPolicy(),
   }));
   return {

@@ -1,17 +1,22 @@
-import { FormEvent, KeyboardEvent, useEffect, useState } from 'react';
-import { api, type CurseForgeProject, type GatewayStatus, type NetworkAllocation, type NodeRecord, type Server, type ServerTemplate } from '../api';
+import { FormEvent, KeyboardEvent, useEffect, useMemo, useState } from 'react';
+import { api, type CurseForgeProject, type GatewayStatus, type NetworkAllocation, type NodeRecord, type Server, type ServerTemplate, type SteamGamePreset } from '../api';
 
-type Software = Server['software'];
-const moddedSoftware: Software[] = ['FABRIC', 'FORGE', 'NEOFORGE'];
+type Platform = Server['platform'];
+type MinecraftSoftware = Exclude<Server['software'], 'STEAMCMD'>;
+const moddedSoftware: MinecraftSoftware[] = ['FABRIC', 'FORGE', 'NEOFORGE'];
+const MAX_JAR_SIZE = 128 * 1024 * 1024;
 
 export function CreateServer({ gateway, servers, nodes, users, busy, submitError, onClose, onSubmit }: { gateway: GatewayStatus; servers: Server[]; nodes: NodeRecord[]; users: Array<{ id: string; username: string; email?: string }>; busy: boolean; submitError?: string; onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
   const gatewayReady = gateway.enabled && gateway.configured && Boolean(gateway.baseDomain);
+  const [platform, setPlatform] = useState<Platform>('minecraft');
   const [name, setName] = useState('');
   const [publishDomain, setPublishDomain] = useState(gatewayReady);
   const [subdomain, setSubdomain] = useState('');
   const [subdomainEdited, setSubdomainEdited] = useState(false);
-  const [software, setSoftware] = useState<Software>('PAPER');
+  const [software, setSoftware] = useState<MinecraftSoftware>('PAPER');
   const [version, setVersion] = useState('LATEST');
+  const [jarFile, setJarFile] = useState<File>();
+  const [jarError, setJarError] = useState('');
   const [nodeId, setNodeId] = useState(nodes.find((node) => node.online && !node.maintenance)?.id ?? nodes.find((node) => !node.maintenance)?.id ?? '');
   const [allocations, setAllocations] = useState<NetworkAllocation[]>([]);
   const [allocationId, setAllocationId] = useState('');
@@ -21,6 +26,8 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
   const [cpuPercent, setCpuPercent] = useState(100);
   const [diskMb, setDiskMb] = useState(10240);
   const [templates, setTemplates] = useState<ServerTemplate[]>([]);
+  const [steamGames, setSteamGames] = useState<SteamGamePreset[]>([]);
+  const [steamGameId, setSteamGameId] = useState('');
   const [withModpack, setWithModpack] = useState(false);
   const [query, setQuery] = useState('');
   const [projects, setProjects] = useState<CurseForgeProject[]>([]);
@@ -30,7 +37,12 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
   const [configured, setConfigured] = useState(true);
   const [catalogError, setCatalogError] = useState('');
 
-  useEffect(() => { api<ServerTemplate[]>('/api/templates').then(setTemplates).catch(() => undefined); }, []);
+  useEffect(() => {
+    void Promise.all([
+      api<ServerTemplate[]>('/api/templates').then(setTemplates),
+      api<SteamGamePreset[]>('/api/steam/games').then((games) => { setSteamGames(games); setSteamGameId((current) => current || games[0]?.id || ''); }),
+    ]).catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -40,7 +52,7 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
     api<NetworkAllocation[]>(`/api/nodes/${nodeId}/allocations/available`)
       .then((items) => {
         if (!active) return;
-        setAllocations(items); setAllocationId(items[0]?.id ?? '');
+        setAllocations(items);
         if (!items.length) setAllocationError('Ce nœud ne possède aucune allocation réseau libre. Ajoutez des ports depuis la page Nœuds.');
       })
       .catch((error) => { if (active) setAllocationError((error as Error).message); })
@@ -48,13 +60,54 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
     return () => { active = false; };
   }, [nodeId]);
 
+  const steamGame = steamGames.find((game) => game.id === steamGameId);
+  const compatibleAllocations = useMemo(
+    () => platform === 'steamcmd' && steamGame ? steamBaseAllocations(allocations, steamGame) : allocations,
+    [allocations, platform, steamGame],
+  );
+
+  useEffect(() => {
+    if (!compatibleAllocations.some((item) => item.id === allocationId)) setAllocationId(compatibleAllocations[0]?.id ?? '');
+    if (!allocationsLoading && allocations.length && !compatibleAllocations.length) {
+      setAllocationError(platform === 'steamcmd' && steamGame ? `${steamGame.name} nécessite ${steamGame.requiredAllocations} allocation(s) contiguë(s). Ajoutez une plage de ports libres sur ce nœud.` : '');
+    } else if (compatibleAllocations.length) setAllocationError('');
+  }, [allocationId, allocations.length, allocationsLoading, compatibleAllocations, platform, steamGame]);
+
   function resetCatalog() { setProjects([]); setSelected(undefined); setSearched(false); setCatalogError(''); }
   function changeName(value: string) {
     setName(value);
     if (!subdomainEdited) setSubdomain(toSubdomain(value));
   }
-  function changeSoftware(value: Software) { setSoftware(value); resetCatalog(); }
+  function changePlatform(value: Platform) {
+    setPlatform(value); setAllocationId(''); resetCatalog();
+    if (value === 'steamcmd') {
+      setPublishDomain(false); setWithModpack(false);
+      const game = steamGame ?? steamGames[0];
+      if (game) applySteamRecommendation(game);
+    } else {
+      setPublishDomain(gatewayReady);
+      setMemoryMb(4096); setDiskMb(10240);
+    }
+  }
+  function changeSoftware(value: MinecraftSoftware) {
+    setSoftware(value); resetCatalog();
+    if (value === 'CUSTOM') { setWithModpack(false); setJarError(''); }
+    else { setJarFile(undefined); if (version.startsWith('CUSTOM')) setVersion('LATEST'); }
+  }
+  function chooseJar(file?: File) {
+    setJarFile(file); setJarError('');
+    setVersion(file ? `CUSTOM ${file.name}`.slice(0, 30) : 'CUSTOM');
+  }
   function changeVersion(value: string) { setVersion(value); resetCatalog(); }
+  function changeSteamGame(id: string) {
+    setSteamGameId(id); setAllocationId('');
+    const game = steamGames.find((item) => item.id === id);
+    if (game) applySteamRecommendation(game);
+  }
+  function applySteamRecommendation(game: SteamGamePreset) {
+    setMemoryMb(game.recommendedMemoryMb);
+    setDiskMb(game.recommendedDiskMb);
+  }
   function toggleModpack(enabled: boolean) {
     setWithModpack(enabled); resetCatalog();
     if (enabled) {
@@ -63,19 +116,20 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
       setDiskMb((value) => Math.max(value, 16384));
     }
   }
-  function applyTemplate(id: string) { const template = templates.find((item) => item.id === id); if (!template) return; setSoftware(template.software); setVersion(template.version); setMemoryMb(template.memoryMb); setCpuPercent(template.cpuPercent); setDiskMb(template.diskMb); setWithModpack(false); resetCatalog(); }
-
+  function applyTemplate(id: string) {
+    const template = templates.find((item) => item.id === id);
+    if (!template || template.software === 'STEAMCMD') return;
+    setPlatform('minecraft'); setSoftware(template.software); setVersion(template.version);
+    setMemoryMb(template.memoryMb); setCpuPercent(template.cpuPercent); setDiskMb(template.diskMb);
+    setWithModpack(false); resetCatalog();
+  }
   function applyRecommendation(project = selected) {
     if (!project) return;
     if (project.minecraftVersion) setVersion(project.minecraftVersion);
     if (project.recommendedMemoryMb) setMemoryMb(project.recommendedMemoryMb);
     if (project.recommendedDiskMb) setDiskMb(project.recommendedDiskMb);
   }
-
-  function chooseProject(project: CurseForgeProject) {
-    setSelected(project);
-    applyRecommendation(project);
-  }
+  function chooseProject(project: CurseForgeProject) { setSelected(project); applyRecommendation(project); }
 
   async function searchCatalog() {
     if (!withModpack || loading) return;
@@ -86,16 +140,17 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
     } catch (error) { setCatalogError((error as Error).message); setProjects([]); setSearched(true); }
     finally { setLoading(false); }
   }
-
   function searchOnEnter(event: KeyboardEvent<HTMLInputElement>) {
     if (event.key !== 'Enter') return;
     event.preventDefault(); void searchCatalog();
   }
-
   function submit(event: FormEvent<HTMLFormElement>) {
-    if (withModpack && !selected) { event.preventDefault(); setCatalogError('Choisissez un modpack avant de créer le serveur.'); return; }
-    if (publishDomain && !subdomain) { event.preventDefault(); setCatalogError('Choisissez un sous-domaine pour l’adresse de connexion.'); return; }
-    if (!allocationId) { event.preventDefault(); setAllocationError('Choisissez une allocation réseau libre avant de créer le serveur.'); return; }
+    if (platform === 'minecraft' && withModpack && !selected) { event.preventDefault(); setCatalogError('Choisissez un modpack avant de créer le serveur.'); return; }
+    if (platform === 'minecraft' && software === 'CUSTOM' && (!jarFile || !jarFile.name.toLowerCase().endsWith('.jar'))) { event.preventDefault(); setJarError('Choisissez un fichier jar (extension .jar).'); return; }
+    if (platform === 'minecraft' && software === 'CUSTOM' && jarFile && jarFile.size > MAX_JAR_SIZE) { event.preventDefault(); setJarError('Le jar personnalisé dépasse la limite de 128 Mo.'); return; }
+    if (platform === 'minecraft' && publishDomain && !subdomain) { event.preventDefault(); setCatalogError('Choisissez un sous-domaine pour l’adresse de connexion.'); return; }
+    if (platform === 'steamcmd' && !steamGame) { event.preventDefault(); setAllocationError('Choisissez un jeu SteamCMD.'); return; }
+    if (!allocationId) { event.preventDefault(); setAllocationError('Choisissez une allocation réseau compatible avant de créer le serveur.'); return; }
     onSubmit(event);
   }
 
@@ -107,28 +162,47 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
 
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
     <form className="modal create-server-modal" onSubmit={submit}>
-      <div className="modal-head"><div><p className="eyebrow">NOUVELLE INSTANCE</p><h2>Créer un serveur</h2></div><button type="button" className="close" onClick={onClose} disabled={busy}>×</button></div>
+      <div className="modal-head"><div><p className="eyebrow">NOUVELLE INSTANCE</p><h2>Créer un serveur de jeu</h2></div><button type="button" className="close" onClick={onClose} disabled={busy}>×</button></div>
       {submitError && <div className="alert create-error" role="alert">{submitError}</div>}
-      {templates.length > 0 && <label>Modèle de configuration<select defaultValue="" onChange={(event) => applyTemplate(event.target.value)}><option value="">Configuration personnalisée</option>{templates.map((template) => <option key={template.id} value={template.id}>{template.name} — {template.software} {template.version}</option>)}</select><small>Préremplit le logiciel, la version et les ressources.</small></label>}
+
+      <div className="platform-picker">
+        <button type="button" className={platform === 'minecraft' ? 'active' : ''} onClick={() => changePlatform('minecraft')}><span>▧</span><strong>Minecraft</strong><small>Vanilla, Paper, Fabric, Forge et modpacks</small></button>
+        <button type="button" className={platform === 'steamcmd' ? 'active' : ''} onClick={() => changePlatform('steamcmd')}><span>◉</span><strong>SteamCMD</strong><small>Installation automatique de serveurs dédiés Steam</small></button>
+      </div>
+      <input type="hidden" name="platform" value={platform}/>
+
+      {platform === 'minecraft' && templates.length > 0 && <label>Modèle de configuration<select defaultValue="" onChange={(event) => applyTemplate(event.target.value)}><option value="">Configuration personnalisée</option>{templates.filter((template) => template.software !== 'STEAMCMD').map((template) => <option key={template.id} value={template.id}>{template.name} — {template.software} {template.version}</option>)}</select><small>Préremplit le logiciel, la version et les ressources.</small></label>}
       <div className="form-row">
-        <label>Nom du serveur<input name="name" required minLength={2} maxLength={40} placeholder="Survie entre amis" value={name} onChange={(event) => changeName(event.target.value)} autoFocus /></label>
+        <label>Nom du serveur<input name="name" required minLength={2} maxLength={40} placeholder={platform === 'steamcmd' ? 'Serveur communautaire' : 'Survie entre amis'} value={name} onChange={(event) => changeName(event.target.value)} autoFocus /></label>
         <label>Nœud Linux<select name="nodeId" value={nodeId} onChange={(event) => setNodeId(event.target.value)} required>{nodes.map((node) => <option key={node.id} value={node.id} disabled={!node.online || node.maintenance}>{node.name} — {node.location}{!node.online ? ' (hors ligne)' : node.maintenance ? ' (maintenance)' : ''}</option>)}</select></label>
       </div>
       <label>Propriétaire<select name="ownerId" required>{users.map((user) => <option key={user.id} value={user.id}>{user.username}{user.email ? ` — ${user.email}` : ''}</option>)}</select></label>
 
-      {gatewayReady ? <section className="gateway-create-card">
+      {platform === 'minecraft' && (gatewayReady ? <section className="gateway-create-card">
         <label className="gateway-toggle"><input type="checkbox" checked={publishDomain} onChange={(event) => setPublishDomain(event.target.checked)} /><span><strong>Créer une adresse de connexion sans port</strong><small>La passerelle acheminera les joueurs vers ce serveur via le port Minecraft standard.</small></span></label>
         {publishDomain && <label className="domain-label">Sous-domaine<div className="domain-input"><input name="subdomain" required minLength={1} maxLength={63} pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" value={subdomain} onChange={(event) => { setSubdomainEdited(true); setSubdomain(toSubdomain(event.target.value)); }} /><span>.{gateway.baseDomain}</span></div><small>Les joueurs utiliseront <strong>{subdomain || 'serveur'}.{gateway.baseDomain}</strong>, sans ajouter de port.</small></label>}
-      </section> : <div className="modpack-warning">La passerelle de domaines Minecraft n’est pas activée. Ce serveur utilisera encore une adresse avec port.</div>}
+      </section> : <div className="modpack-warning">La passerelle de domaines Minecraft n’est pas activée. Ce serveur utilisera encore une adresse avec port.</div>)}
 
-      <div className="form-row">
-        <label>Logiciel<select name="software" value={software} onChange={(event) => changeSoftware(event.target.value as Software)}><option>PAPER</option><option>VANILLA</option><option>PURPUR</option><option>FABRIC</option><option>FORGE</option><option>NEOFORGE</option></select></label>
-        <label>Version Minecraft<input name="version" value={version} onChange={(event) => changeVersion(event.target.value)} required /></label>
-      </div>
+      {platform === 'minecraft' ? <>
+        <div className="form-row">
+          <label>Logiciel<select name="software" value={software} onChange={(event) => changeSoftware(event.target.value as MinecraftSoftware)}><option>PAPER</option><option>VANILLA</option><option>PURPUR</option><option>FABRIC</option><option>FORGE</option><option>NEOFORGE</option><option value="CUSTOM">Jar personnalisé</option></select></label>
+          {software === 'CUSTOM'
+            ? <label>Fichier jar<input name="jarFile" type="file" accept=".jar,application/java-archive,application/x-java-archive" required onChange={(event) => chooseJar(event.target.files?.[0])} /><small>Votre jar est envoyé puis installé comme <code>server.jar</code> dans le dossier du serveur. Aucun téléchargement automatique.</small></label>
+            : <label>Version Minecraft<input name="version" value={version} onChange={(event) => changeVersion(event.target.value)} required /></label>}
+        </div>
+        {software === 'CUSTOM' && jarError && <div className="modpack-warning">{jarError}</div>}
+        {software === 'CUSTOM' && <input type="hidden" name="version" value={version} />}
+        <label className="modpack-toggle"><input type="checkbox" checked={withModpack} disabled={software === 'CUSTOM'} onChange={(event) => toggleModpack(event.target.checked)} /><span><strong>Installer directement un modpack CurseForge</strong><small>Padock téléchargera et appliquera le server pack officiel fourni par l’auteur.</small></span></label>
+      </> : <>
+        <input type="hidden" name="software" value="STEAMCMD"/><input type="hidden" name="version" value="latest"/><input type="hidden" name="steamGameId" value={steamGameId}/>
+        <section className="steam-game-picker">
+          <div className="picker-head"><div><strong>Jeu à installer avec SteamCMD</strong><small>Mise à jour vérifiée à chaque démarrage</small></div></div>
+          <div className="steam-game-grid">{steamGames.map((game) => <button type="button" key={game.id} className={steamGameId === game.id ? 'active' : ''} onClick={() => changeSteamGame(game.id)}><span>◉</span><div><strong>{game.name}</strong><small>App ID {game.appId} · {game.requiredAllocations} port{game.requiredAllocations > 1 ? 's' : ''}</small><p>{game.description}</p></div></button>)}</div>
+          {steamGame && <div className="steam-runtime-summary"><div><strong>Réseau du conteneur</strong><span>{steamGame.ports.map((port) => `${port.name} ${port.internalPort}/${port.protocol.toUpperCase()}`).join(' · ')}</span></div><div><strong>Ressources recommandées</strong><span>{formatMegabytes(steamGame.recommendedMemoryMb)} RAM · {formatMegabytes(steamGame.recommendedDiskMb)} disque</span></div></div>}
+        </section>
+      </>}
 
-      <label className="modpack-toggle"><input type="checkbox" checked={withModpack} onChange={(event) => toggleModpack(event.target.checked)} /><span><strong>Installer directement un modpack CurseForge</strong><small>Padock téléchargera et appliquera le server pack officiel fourni par l’auteur.</small></span></label>
-
-      {withModpack && <section className="create-modpack-picker">
+      {platform === 'minecraft' && withModpack && <section className="create-modpack-picker">
         <div className="picker-head"><div><strong>Choisir le modpack</strong><small>{software} · {version}</small></div>{selected && <span className="selected-pack">✓ {selected.title}</span>}</div>
         {!configured && <div className="modpack-warning">La clé API CurseForge n’est pas configurée.</div>}
         {catalogError && <div className="alert">{catalogError}</div>}
@@ -150,7 +224,7 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
 
       <div className="form-row">
         <label>Mémoire (Mo)<input name="memoryMb" type="number" min="1024" max="65536" step="512" value={memoryMb} onChange={(event) => setMemoryMb(Number(event.target.value))} required /></label>
-        <label>{gatewayReady ? 'Port interne' : 'Allocation réseau'}<select name="allocationId" value={allocationId} onChange={(event) => setAllocationId(event.target.value)} required disabled={allocationsLoading || !allocations.length}><option value="">{allocationsLoading ? 'Chargement des ports…' : 'Aucun port libre'}</option>{allocations.map((allocation) => <option value={allocation.id} key={allocation.id}>{allocationLabel(allocation)}</option>)}</select><small>{gatewayReady ? 'Choisi dans la plage du nœud et masqué aux joueurs par la passerelle.' : 'Seuls les ports libres configurés sur le nœud sont proposés.'}</small></label>
+        <label>{platform === 'steamcmd' ? 'Plage réseau externe' : gatewayReady ? 'Port interne' : 'Allocation réseau'}<select name="allocationId" value={allocationId} onChange={(event) => setAllocationId(event.target.value)} required disabled={allocationsLoading || !compatibleAllocations.length}><option value="">{allocationsLoading ? 'Chargement des ports…' : 'Aucun port compatible'}</option>{compatibleAllocations.map((allocation) => <option value={allocation.id} key={allocation.id}>{platform === 'steamcmd' && steamGame ? steamAllocationLabel(allocation, steamGame) : allocationLabel(allocation)}</option>)}</select><small>{platform === 'steamcmd' ? 'Padock réserve automatiquement tous les ports nécessaires au jeu.' : gatewayReady ? 'Choisi dans la plage du nœud et masqué aux joueurs par la passerelle.' : 'Seuls les ports libres configurés sur le nœud sont proposés.'}</small></label>
       </div>
       {allocationError && <div className="modpack-warning">{allocationError}</div>}
       <div className="form-row">
@@ -158,10 +232,15 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
         <label>Disque (Mo)<input name="diskMb" type="number" min="1024" max="1048576" step="1024" value={diskMb} onChange={(event) => setDiskMb(Number(event.target.value))} required /></label>
       </div>
       {exceedsNodeCapacity && <div className="modpack-warning">Attention : {formatMegabytes(allocatedMemoryMb)} sont déjà alloués sur {formatMegabytes(nodeMemoryMb)}. Cette nouvelle instance dépasserait la capacité mémoire du nœud.</div>}
-      <p className="hint">{busy ? 'Ajout dans la file d’opérations…' : withModpack ? 'Le server pack sera installé en arrière-plan. Vous pourrez suivre sa progression dans Opérations.' : 'La création continuera en arrière-plan même si vous fermez la page.'}</p>
-      <div className="modal-actions"><button type="button" className="secondary" onClick={onClose} disabled={busy}>Annuler</button><button className="primary" disabled={busy || !allocationId || (withModpack && !selected)}>{busy ? 'Préparation…' : withModpack ? 'Créer avec ce modpack' : 'Créer le serveur'}</button></div>
+      <p className="hint">{busy ? 'Ajout dans la file d’opérations…' : platform === 'steamcmd' ? 'SteamCMD téléchargera et vérifiera les fichiers du serveur en arrière-plan. Le premier démarrage appliquera aussi les mises à jour disponibles.' : software === 'CUSTOM' ? 'Le jar est transféré sur le nœud avant le premier démarrage. Le serveur utilisera votre jar tel quel.' : withModpack ? 'Le server pack sera installé en arrière-plan. Vous pourrez suivre sa progression dans Opérations.' : 'La création continuera en arrière-plan même si vous fermez la page.'}</p>
+      <div className="modal-actions"><button type="button" className="secondary" onClick={onClose} disabled={busy}>Annuler</button><button className="primary" disabled={busy || !allocationId || (platform === 'minecraft' && withModpack && !selected) || (platform === 'minecraft' && software === 'CUSTOM' && !jarFile) || (platform === 'steamcmd' && !steamGame)}>{busy ? 'Préparation…' : platform === 'steamcmd' ? `Installer ${steamGame?.name ?? 'le jeu'}` : withModpack ? 'Créer avec ce modpack' : software === 'CUSTOM' ? 'Créer avec ce jar' : 'Créer le serveur'}</button></div>
     </form>
   </div>;
+}
+
+function steamBaseAllocations(allocations: NetworkAllocation[], game: SteamGamePreset) {
+  const offsets = [...new Set(game.ports.map((port) => port.allocationOffset))];
+  return allocations.filter((candidate) => offsets.every((offset) => allocations.some((item) => item.ip === candidate.ip && item.port === candidate.port + offset)));
 }
 
 function formatDownloads(value: number) {
@@ -175,6 +254,12 @@ function formatMegabytes(value: number) {
 function allocationLabel(allocation: NetworkAllocation) {
   const address = allocation.alias || (allocation.ip === '0.0.0.0' ? 'Toutes les interfaces' : allocation.ip);
   return `${address}:${allocation.port}`;
+}
+
+function steamAllocationLabel(allocation: NetworkAllocation, game: SteamGamePreset) {
+  const address = allocation.alias || (allocation.ip === '0.0.0.0' ? 'Toutes les interfaces' : allocation.ip);
+  const maximumOffset = Math.max(...game.ports.map((port) => port.allocationOffset));
+  return maximumOffset ? `${address}:${allocation.port}–${allocation.port + maximumOffset} · ${game.requiredAllocations} ports` : `${address}:${allocation.port} · TCP/UDP`;
 }
 
 function toSubdomain(value: string) {

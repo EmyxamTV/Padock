@@ -16,6 +16,7 @@
     "test:backups": "npm run build && node scripts/backup-stream-smoke.mjs",
     "test:console": "npm run build && node scripts/console-race-smoke.mjs",
     "test:metrics": "npm run build && node scripts/resource-metrics-smoke.mjs",
+    "test:steamcmd": "npm run build && node scripts/steamcmd-smoke.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.agent.json && tsc --noEmit -p tsconfig.web.json"
   },
   "dependencies": {

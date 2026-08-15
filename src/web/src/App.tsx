@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { io as connectSocket } from 'socket.io-client';
-import { api, type AuditEntry, type GatewayStatus, type NetworkAllocation, type NodeRecord, type PanelJob, type PanelNotification, type PanelPermission, type PanelRole, type Server, type UserDirectoryEntry, type UserGroup, type UserRecord } from './api';
+import { api, type AuditEntry, type GatewayStatus, type NetworkAllocation, type NodeRecord, type PanelJob, type PanelNotification, type PanelPermission, type PanelRole, type Server, type UserDirectoryEntry, type UserGroup, type UserRecord, upload } from './api';
 import { Auth } from './components/Auth';
 import { CreateServer } from './components/CreateServer';
 import { ServerCard } from './components/ServerCard';
@@ -70,11 +70,20 @@ export function App() {
       const modpackProjectId = Number(form.get('modpackProjectId'));
       const modpackSlug = String(form.get('modpackSlug') ?? '');
       const subdomain = String(form.get('subdomain') ?? '').trim();
+      const jarFile = form.get('jarFile');
+      let customJar: { uploadId: string; filename: string } | undefined;
+      if (form.get('software') === 'CUSTOM') {
+        if (!(jarFile instanceof File) || !jarFile.size) throw new Error('Choisissez un fichier jar avant de créer le serveur.');
+        if (jarFile.size > 128 * 1024 * 1024) throw new Error('Le jar personnalisé dépasse la limite de 128 Mo.');
+        const staged = await upload<{ uploadId: string }>(`/api/jars?filename=${encodeURIComponent(jarFile.name)}`, jarFile);
+        customJar = { uploadId: staged.uploadId, filename: jarFile.name };
+      }
       const server = await api<Server>('/api/servers', { method: 'POST', body: JSON.stringify({
-        name: form.get('name'), software: form.get('software'), version: form.get('version'), nodeId: form.get('nodeId'), ownerId: form.get('ownerId'),
+        name: form.get('name'), platform: form.get('platform'), software: form.get('software'), version: form.get('version'), steamGameId: form.get('steamGameId') || undefined, nodeId: form.get('nodeId'), ownerId: form.get('ownerId'),
         memoryMb: Number(form.get('memoryMb')), cpuPercent: Number(form.get('cpuPercent')), diskMb: Number(form.get('diskMb')),
         allocationId: form.get('allocationId'), subdomain: subdomain || undefined,
         modpack: modpackProjectId > 0 && modpackSlug ? { projectId: modpackProjectId, slug: modpackSlug } : undefined,
+        customJar,
       }) });
       setServers((current) => [...current, server]); setCreating(false); setCreateError(''); setSelectedId(server.id);
     } catch (err) { setCreateError((err as Error).message); }
@@ -151,11 +160,11 @@ function Dashboard({ servers, nodes, admin, onSelect, onCreate }: { servers: Ser
     <div className="stat"><span className="stat-icon purple">⌘</span><div><strong>{nodes.filter((node) => node.online).length}/{nodes.length}</strong><small>NŒUDS ACTIFS</small></div></div>
   </section>
   {offlineNodes > 0 && <div className="infrastructure-notice danger"><strong>{offlineNodes} nœud{offlineNodes > 1 ? 's' : ''} hors ligne</strong><span>Les serveurs associés sont temporairement indisponibles.</span></div>}
-  <section className="section-head"><div><p className="eyebrow">VOS INSTANCES</p><h2>Serveurs Minecraft</h2></div><span>{sortedServers.length === servers.length ? `${servers.length} au total` : `${sortedServers.length} sur ${servers.length}`}</span></section>
+  <section className="section-head"><div><p className="eyebrow">VOS INSTANCES</p><h2>Serveurs de jeu</h2></div><span>{sortedServers.length === servers.length ? `${servers.length} au total` : `${sortedServers.length} sur ${servers.length}`}</span></section>
   {servers.length > 0 && <div className="dashboard-controls"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Rechercher un serveur, logiciel, version…"/><select value={status} onChange={(event) => setStatus(event.target.value as 'all' | Server['status'])}><option value="all">Tous les états</option><option value="running">En ligne</option><option value="stopped">Arrêtés</option><option value="starting">Démarrage</option><option value="installing">Installation</option><option value="missing">À réparer</option><option value="unavailable">Indisponibles</option></select></div>}
   {sortedServers.length ? <div className="server-grid">{sortedServers.map((server) => <ServerCard key={server.id} server={server} onClick={() => onSelect(server.id)} />)}</div>
     : servers.length ? <div className="empty compact-empty"><div className="empty-cube">⌕</div><h2>Aucun résultat</h2><p>Modifiez la recherche ou le filtre d’état.</p><button className="secondary" onClick={() => { setQuery(''); setStatus('all'); }}>Réinitialiser</button></div>
-    : <div className="empty"><div className="empty-cube">◇</div><h2>Aucun serveur</h2><p>{admin ? 'Créez la première instance Minecraft de votre infrastructure.' : 'Aucun serveur ne vous a encore été attribué.'}</p>{admin && <button className="primary" onClick={onCreate}>Créer un serveur</button>}</div>}</>;
+    : <div className="empty"><div className="empty-cube">◇</div><h2>Aucun serveur</h2><p>{admin ? 'Créez la première instance de jeu de votre infrastructure.' : 'Aucun serveur ne vous a encore été attribué.'}</p>{admin && <button className="primary" onClick={onCreate}>Créer un serveur</button>}</div>}</>;
 }
 
 function NodesView({ nodes, servers, admin, onChanged }: { nodes: NodeRecord[]; servers: Server[]; admin: boolean; onChanged: () => void }) {

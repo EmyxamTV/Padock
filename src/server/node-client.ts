@@ -1,5 +1,5 @@
 import { Readable } from 'node:stream';
-import type { MinecraftServer, NodeRecord, ServerSoftware, SftpAccount } from './types.js';
+import type { MinecraftServer, NodeRecord, ServerPlatform, ServerPort, ServerSoftware, SftpAccount, SteamServerConfig } from './types.js';
 
 export interface NodeHealth {
   ok: boolean;
@@ -53,12 +53,15 @@ export class NodeClient {
   create(input: {
     id: string;
     name: string;
+    platform: ServerPlatform;
     software: ServerSoftware;
     version: string;
     memoryMb: number;
     cpuPercent: number;
     diskMb: number;
     port: number;
+    ports: ServerPort[];
+    steam?: SteamServerConfig;
   }, serverPack?: RemoteServerPack) {
     return this.request<{ dockerId: string }>('/v1/servers', { method: 'POST', body: JSON.stringify({ ...input, serverPack }) }, 30 * 60_000);
   }

@@ -94,3 +94,21 @@ main td{font-size:13px;line-height:1.5}
 .detail-metrics strong,.monitoring-kpis strong,.installed-list strong,.resource-save strong,.resource-recommendation strong{font-size:13px;line-height:1.4}
 .notification-button span{min-width:20px;height:20px;font-size:11px;line-height:20px}
 .console-output{font-size:13px;line-height:1.55}
+
+.platform-picker{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:20px}
+.platform-picker>button{display:grid;grid-template-columns:38px 1fr;grid-template-rows:auto auto;align-items:center;column-gap:11px;padding:14px;border:1px solid #2b2e39;border-radius:10px;background:#11131a;color:#8b8e9c;text-align:left;cursor:pointer}
+.platform-picker>button>span{grid-row:1/3;display:grid;place-items:center;width:38px;height:38px;border-radius:9px;background:#24212f;color:#a496f4;font-size:17px}
+.platform-picker>button strong{color:#d6d8e0;font-size:12px}.platform-picker>button small{margin-top:3px;color:#6f7281}
+.platform-picker>button:hover,.platform-picker>button.active{border-color:#675abb;background:#1b1829}.platform-picker>button.active>span{background:#30284e;color:#c1b7ff}
+.steam-game-picker{margin-bottom:18px;padding:15px;border:1px solid #302d43;border-radius:10px;background:#101219}
+.steam-game-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.steam-game-grid>button{display:flex;align-items:flex-start;gap:10px;min-width:0;padding:12px;border:1px solid #292c37;border-radius:9px;background:#171921;color:#c9cbd4;text-align:left;cursor:pointer}
+.steam-game-grid>button:hover,.steam-game-grid>button.active{border-color:#675abb;background:#1d1a2c}
+.steam-game-grid>button>span{display:grid;place-items:center;width:30px;height:30px;flex:0 0 auto;border-radius:7px;background:#29243f;color:#a99afa}
+.steam-game-grid>button>div{min-width:0}.steam-game-grid strong,.steam-game-grid small{display:block}.steam-game-grid strong{font-size:11px}.steam-game-grid small{margin-top:4px;color:#777a89}
+.steam-game-grid p{margin:8px 0 0!important;color:#8b8e9b;font-size:10px!important;line-height:1.45}
+.steam-runtime-summary{display:grid;grid-template-columns:1.3fr 1fr;gap:8px;margin-top:10px}
+.steam-runtime-summary>div{padding:11px;border:1px solid #292c36;border-radius:8px;background:#15171f}.steam-runtime-summary strong,.steam-runtime-summary span{display:block}.steam-runtime-summary strong{font-size:10px}.steam-runtime-summary span{margin-top:5px;color:#818493;font-size:10px;line-height:1.45}
+.steam-runtime-panel{min-height:0}.steam-port-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px}.steam-port-list>div{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px;border:1px solid #292c36;border-radius:8px;background:#15171f}.steam-port-list strong,.steam-port-list small{display:block}.steam-port-list strong{font-size:11px}.steam-port-list small{margin-top:4px;color:#717584}.steam-port-list code{white-space:nowrap;color:#aa9df5}
+@media(max-width:850px){.steam-game-grid{grid-template-columns:1fr}.steam-runtime-summary{grid-template-columns:1fr}}
+@media(max-width:520px){.platform-picker{grid-template-columns:1fr}}
