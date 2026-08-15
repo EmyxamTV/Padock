@@ -92,6 +92,20 @@ export class ServerFiles {
     await rm(target, { recursive: true, force: false });
   }
 
+  async chooseServerJar(serverId: string, relative: string) {
+    if (!relative.toLowerCase().endsWith('.jar') || path.isAbsolute(relative) || relative.split(/[\\/]/).includes('..')) throw httpError(400, 'Chemin de jar invalide.');
+    const source = this.target(serverId, relative);
+    await this.assertNotSymlink(source);
+    const info = await stat(source);
+    if (!info.isFile()) throw httpError(400, 'Ce chemin n’est pas un fichier jar.');
+    const destination = this.target(serverId, 'server.jar');
+    if (source !== destination) {
+      await rm(destination, { force: true });
+      await rename(source, destination);
+      await this.applyOwnership(serverId, destination);
+    }
+  }
+
   async listInstalled(serverId: string, kind: 'plugin' | 'mod') {
     const folder = kind === 'plugin' ? 'plugins' : 'mods';
     const directory = this.target(serverId, folder);

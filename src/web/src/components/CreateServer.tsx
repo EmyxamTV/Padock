@@ -4,7 +4,6 @@ import { api, type CurseForgeProject, type GatewayStatus, type NetworkAllocation
 type Platform = Server['platform'];
 type MinecraftSoftware = Exclude<Server['software'], 'STEAMCMD'>;
 const moddedSoftware: MinecraftSoftware[] = ['FABRIC', 'FORGE', 'NEOFORGE'];
-const MAX_JAR_SIZE = 128 * 1024 * 1024;
 
 export function CreateServer({ gateway, servers, nodes, users, busy, submitError, onClose, onSubmit }: { gateway: GatewayStatus; servers: Server[]; nodes: NodeRecord[]; users: Array<{ id: string; username: string; email?: string }>; busy: boolean; submitError?: string; onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
   const gatewayReady = gateway.enabled && gateway.configured && Boolean(gateway.baseDomain);
@@ -15,8 +14,6 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
   const [subdomainEdited, setSubdomainEdited] = useState(false);
   const [software, setSoftware] = useState<MinecraftSoftware>('PAPER');
   const [version, setVersion] = useState('LATEST');
-  const [jarFile, setJarFile] = useState<File>();
-  const [jarError, setJarError] = useState('');
   const [nodeId, setNodeId] = useState(nodes.find((node) => node.online && !node.maintenance)?.id ?? nodes.find((node) => !node.maintenance)?.id ?? '');
   const [allocations, setAllocations] = useState<NetworkAllocation[]>([]);
   const [allocationId, setAllocationId] = useState('');
@@ -91,12 +88,8 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
   }
   function changeSoftware(value: MinecraftSoftware) {
     setSoftware(value); resetCatalog();
-    if (value === 'CUSTOM') { setWithModpack(false); setJarError(''); }
-    else { setJarFile(undefined); if (version.startsWith('CUSTOM')) setVersion('LATEST'); }
-  }
-  function chooseJar(file?: File) {
-    setJarFile(file); setJarError('');
-    setVersion(file ? `CUSTOM ${file.name}`.slice(0, 30) : 'CUSTOM');
+    if (value === 'CUSTOM') { setWithModpack(false); setVersion('CUSTOM'); }
+    else if (version === 'CUSTOM') setVersion('LATEST');
   }
   function changeVersion(value: string) { setVersion(value); resetCatalog(); }
   function changeSteamGame(id: string) {
@@ -146,8 +139,6 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
   }
   function submit(event: FormEvent<HTMLFormElement>) {
     if (platform === 'minecraft' && withModpack && !selected) { event.preventDefault(); setCatalogError('Choisissez un modpack avant de créer le serveur.'); return; }
-    if (platform === 'minecraft' && software === 'CUSTOM' && (!jarFile || !jarFile.name.toLowerCase().endsWith('.jar'))) { event.preventDefault(); setJarError('Choisissez un fichier jar (extension .jar).'); return; }
-    if (platform === 'minecraft' && software === 'CUSTOM' && jarFile && jarFile.size > MAX_JAR_SIZE) { event.preventDefault(); setJarError('Le jar personnalisé dépasse la limite de 128 Mo.'); return; }
     if (platform === 'minecraft' && publishDomain && !subdomain) { event.preventDefault(); setCatalogError('Choisissez un sous-domaine pour l’adresse de connexion.'); return; }
     if (platform === 'steamcmd' && !steamGame) { event.preventDefault(); setAllocationError('Choisissez un jeu SteamCMD.'); return; }
     if (!allocationId) { event.preventDefault(); setAllocationError('Choisissez une allocation réseau compatible avant de créer le serveur.'); return; }
@@ -187,11 +178,9 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
         <div className="form-row">
           <label>Logiciel<select name="software" value={software} onChange={(event) => changeSoftware(event.target.value as MinecraftSoftware)}><option>PAPER</option><option>VANILLA</option><option>PURPUR</option><option>FABRIC</option><option>FORGE</option><option>NEOFORGE</option><option value="CUSTOM">Jar personnalisé</option></select></label>
           {software === 'CUSTOM'
-            ? <label>Fichier jar<input name="jarFile" type="file" accept=".jar,application/java-archive,application/x-java-archive" required onChange={(event) => chooseJar(event.target.files?.[0])} /><small>Votre jar est envoyé puis installé comme <code>server.jar</code> dans le dossier du serveur. Aucun téléchargement automatique.</small></label>
+            ? <><label>Jar du serveur<span className="readonly-field">Choisi après la création</span><small>Importez vos fichiers (dont le jar) puis définissez-le comme jar du serveur dans le gestionnaire de fichiers.</small></label><input type="hidden" name="version" value="CUSTOM" /></>
             : <label>Version Minecraft<input name="version" value={version} onChange={(event) => changeVersion(event.target.value)} required /></label>}
         </div>
-        {software === 'CUSTOM' && jarError && <div className="modpack-warning">{jarError}</div>}
-        {software === 'CUSTOM' && <input type="hidden" name="version" value={version} />}
         <label className="modpack-toggle"><input type="checkbox" checked={withModpack} disabled={software === 'CUSTOM'} onChange={(event) => toggleModpack(event.target.checked)} /><span><strong>Installer directement un modpack CurseForge</strong><small>Padock téléchargera et appliquera le server pack officiel fourni par l’auteur.</small></span></label>
       </> : <>
         <input type="hidden" name="software" value="STEAMCMD"/><input type="hidden" name="version" value="latest"/><input type="hidden" name="steamGameId" value={steamGameId}/>
@@ -232,8 +221,8 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
         <label>Disque (Mo)<input name="diskMb" type="number" min="1024" max="1048576" step="1024" value={diskMb} onChange={(event) => setDiskMb(Number(event.target.value))} required /></label>
       </div>
       {exceedsNodeCapacity && <div className="modpack-warning">Attention : {formatMegabytes(allocatedMemoryMb)} sont déjà alloués sur {formatMegabytes(nodeMemoryMb)}. Cette nouvelle instance dépasserait la capacité mémoire du nœud.</div>}
-      <p className="hint">{busy ? 'Ajout dans la file d’opérations…' : platform === 'steamcmd' ? 'SteamCMD téléchargera et vérifiera les fichiers du serveur en arrière-plan. Le premier démarrage appliquera aussi les mises à jour disponibles.' : software === 'CUSTOM' ? 'Le jar est transféré sur le nœud avant le premier démarrage. Le serveur utilisera votre jar tel quel.' : withModpack ? 'Le server pack sera installé en arrière-plan. Vous pourrez suivre sa progression dans Opérations.' : 'La création continuera en arrière-plan même si vous fermez la page.'}</p>
-      <div className="modal-actions"><button type="button" className="secondary" onClick={onClose} disabled={busy}>Annuler</button><button className="primary" disabled={busy || !allocationId || (platform === 'minecraft' && withModpack && !selected) || (platform === 'minecraft' && software === 'CUSTOM' && !jarFile) || (platform === 'steamcmd' && !steamGame)}>{busy ? 'Préparation…' : platform === 'steamcmd' ? `Installer ${steamGame?.name ?? 'le jeu'}` : withModpack ? 'Créer avec ce modpack' : software === 'CUSTOM' ? 'Créer avec ce jar' : 'Créer le serveur'}</button></div>
+      <p className="hint">{busy ? 'Ajout dans la file d’opérations…' : platform === 'steamcmd' ? 'SteamCMD téléchargera et vérifiera les fichiers du serveur en arrière-plan. Le premier démarrage appliquera aussi les mises à jour disponibles.' : software === 'CUSTOM' ? 'Le serveur est créé sans jar. Importez ensuite vos fichiers puis choisissez le jar dans le gestionnaire de fichiers.' : withModpack ? 'Le server pack sera installé en arrière-plan. Vous pourrez suivre sa progression dans Opérations.' : 'La création continuera en arrière-plan même si vous fermez la page.'}</p>
+      <div className="modal-actions"><button type="button" className="secondary" onClick={onClose} disabled={busy}>Annuler</button><button className="primary" disabled={busy || !allocationId || (platform === 'minecraft' && withModpack && !selected) || (platform === 'steamcmd' && !steamGame)}>{busy ? 'Préparation…' : platform === 'steamcmd' ? `Installer ${steamGame?.name ?? 'le jeu'}` : withModpack ? 'Créer avec ce modpack' : 'Créer le serveur'}</button></div>
     </form>
   </div>;
 }

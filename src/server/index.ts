@@ -1,7 +1,6 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
 import jwt from '@fastify/jwt';
@@ -22,7 +21,6 @@ import type { Allocation, AuditEntry, JobKind, MinecraftServer, PanelJob, PanelN
 const host = padockEnv('HOST') ?? '0.0.0.0';
 const port = Number(padockEnv('PORT') ?? 3000);
 const dataDir = path.resolve(padockEnv('DATA_DIR') ?? './data');
-const jarsDir = path.join(dataDir, 'jars');
 const isProduction = process.env.NODE_ENV === 'production';
 const jwtSecret = padockEnv('JWT_SECRET') ?? (isProduction ? '' : 'padock-development-secret-change-me');
 const publicUrl = padockEnv('PUBLIC_URL') ?? `http://localhost:${port}`;
@@ -40,8 +38,6 @@ const lastRestartCounts = new Map<string, number>();
 let collectingMetrics = false;
 let monitoringCrashes = false;
 await store.load();
-await rm(jarsDir, { recursive: true, force: true });
-await mkdir(jarsDir, { recursive: true });
 await store.update((draft) => {
   for (const job of draft.jobs) if (job.status === 'running') { job.status = 'queued'; job.step = 'Reprise après redémarrage du panel'; job.updatedAt = new Date().toISOString(); }
   for (const allocation of draft.allocations) if (allocation.reservationId && !draft.jobs.some((job) => job.id === allocation.reservationId && ['queued', 'running'].includes(job.status))) allocation.reservationId = undefined;
@@ -129,14 +125,12 @@ const serverSchema = z.object({
   ownerId: z.string().optional(),
   subdomain: z.string().trim().toLowerCase().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/).optional(),
   modpack: z.object({ projectId: z.number().int().positive(), slug: z.string().regex(/^[a-z0-9-]{2,100}$/i) }).optional(),
-  customJar: z.object({ uploadId: z.string().regex(/^[a-f0-9]{16}$/), filename: z.string().trim().min(1).max(240) }).optional(),
   steamGameId: z.string().regex(/^[a-z0-9-]{2,50}$/).optional(),
 })
   .refine((value) => value.platform !== 'steamcmd' || value.software === 'STEAMCMD' && Boolean(value.steamGameId), { message: 'Choisissez un jeu SteamCMD.', path: ['steamGameId'] })
   .refine((value) => value.platform !== 'minecraft' || value.software !== 'STEAMCMD' && !value.steamGameId, { message: 'Configuration Minecraft invalide.', path: ['software'] })
-  .refine((value) => value.platform === 'minecraft' || !value.subdomain && !value.modpack && !value.customJar, { message: 'Les domaines Gate et les modpacks sont réservés aux serveurs Minecraft.', path: ['platform'] })
-  .refine((value) => value.software !== 'CUSTOM' || value.platform === 'minecraft' && Boolean(value.customJar), { message: 'Choisissez un fichier jar personnalisé.', path: ['customJar'] })
-  .refine((value) => !value.customJar || value.software === 'CUSTOM', { message: 'Un jar personnalisé ne s’applique qu’au logiciel « Jar personnalisé ».', path: ['software'] })
+  .refine((value) => value.platform === 'minecraft' || !value.subdomain && !value.modpack, { message: 'Les domaines Gate et les modpacks sont réservés aux serveurs Minecraft.', path: ['platform'] })
+  .refine((value) => value.software !== 'CUSTOM' || value.platform === 'minecraft', { message: 'Le logiciel « Jar personnalisé » nécessite la plateforme Minecraft.', path: ['software'] })
   .refine((value) => value.software !== 'CUSTOM' || !value.modpack, { message: 'Les modpacks CurseForge sont incompatibles avec un jar personnalisé.', path: ['modpack'] });
 
 app.get('/api/health', async () => {
@@ -666,15 +660,6 @@ app.get('/api/curseforge/modpacks', { preHandler: [auth, requirePanelPermission(
   };
 });
 
-app.put('/api/jars', { preHandler: [auth, requirePanelPermission('servers.create')] }, async (request, reply) => {
-  const filename = String((request.query as { filename?: string }).filename ?? '').trim().replace(/[\\/]/g, '_').slice(0, 240);
-  if (!filename || !Buffer.isBuffer(request.body) || request.body.length === 0) return reply.code(400).send({ error: 'Upload de jar invalide.' });
-  const uploadId = randomUUID().replace(/-/g, '').slice(0, 16);
-  await writeFile(path.join(jarsDir, `${uploadId}.jar`), request.body);
-  await recordAudit(currentUser(request)?.id, 'jar.stage', 'panel', uploadId, { filename, size: request.body.length });
-  return reply.code(201).send({ uploadId, filename });
-});
-
 app.post('/api/servers', { preHandler: [auth, requirePanelPermission('servers.create')] }, async (request, reply) => {
   const parsed = serverSchema.safeParse(request.body);
   if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message });
@@ -707,10 +692,6 @@ app.post('/api/servers', { preHandler: [auth, requirePanelPermission('servers.cr
   if (parsed.data.modpack && (parsed.data.platform !== 'minecraft' || !['FABRIC', 'FORGE', 'NEOFORGE'].includes(parsed.data.software))) {
     return reply.code(400).send({ error: 'Les modpacks CurseForge nécessitent Fabric, Forge ou NeoForge.' });
   }
-  if (parsed.data.customJar) {
-    try { if (!(await stat(path.join(jarsDir, `${parsed.data.customJar.uploadId}.jar`))).isFile()) throw new Error(); }
-    catch { return reply.code(400).send({ error: 'Le jar personnalisé n’est plus disponible. Refaites l’upload puis réessayez.' }); }
-  }
   let created!: { server: MinecraftServer; job: PanelJob };
   try {
     created = await store.transaction((draft) => {
@@ -736,7 +717,7 @@ app.post('/api/servers', { preHandler: [auth, requirePanelPermission('servers.cr
         nodeId: node.id, allocationId: allocation.id, ownerId: owner.id, domain,
         crashPolicy: defaultCrashPolicy(), backupPolicy: defaultBackupPolicy(), createdAt: new Date().toISOString(),
       };
-      const job = makeJob('server.create', actor.id, server.id, node.id, { modpack: parsed.data.modpack, customJar: parsed.data.customJar });
+      const job = makeJob('server.create', actor.id, server.id, node.id, { modpack: parsed.data.modpack });
       job.id = jobId; for (const item of selectedAllocations) item.serverId = server.id; draft.servers.push(server); draft.jobs.unshift(job);
       draft.auditLogs.unshift(audit(actor.id, 'server.installing', 'server', server.id, { nodeId: node.id, ownerId: owner.id, jobId, platform: server.platform, steamGame: server.steam?.presetId }));
       return { server, job };
@@ -862,6 +843,15 @@ app.post('/api/servers/:id/files/rename', { preHandler: auth }, async (request, 
   if (!parsed.success) return reply.code(400).send({ error: 'Chemins invalides.' });
   const result = await clientFor(server).renameFile(server, parsed.data.source, parsed.data.destination);
   await recordAudit(currentUser(request)?.id, 'file.rename', 'server', server.id, parsed.data); return result;
+});
+
+app.put('/api/servers/:id/jar', { preHandler: auth }, async (request, reply) => {
+  const server = authorizedServer(request, reply, (request.params as { id: string }).id, 'files.write'); if (!server) return;
+  if (server.platform !== 'minecraft' || server.software !== 'CUSTOM') return reply.code(409).send({ error: 'Le choix du jar ne concerne que les serveurs à jar personnalisé.' });
+  const parsed = z.object({ path: z.string().min(1).max(500) }).safeParse(request.body);
+  if (!parsed.success) return reply.code(400).send({ error: 'Chemin invalide.' });
+  const result = await clientFor(server).chooseServerJar(server, parsed.data.path);
+  await recordAudit(currentUser(request)?.id, 'server.jar_set', 'server', server.id, { path: parsed.data.path }); return result;
 });
 
 app.post('/api/servers/:id/files/directory', { preHandler: auth }, async (request, reply) => {
@@ -1579,22 +1569,14 @@ async function executePanelJob(id: string): Promise<Record<string, unknown>> {
     const node = store.snapshot.nodes.find((item) => item.id === server.nodeId); if (!node) throw new Error('Nœud introuvable.');
     await updateJob(id, 10, 'Préparation de l’installation');
     const modpackInput = job.payload.modpack as { projectId: number; slug: string } | undefined;
-    const customJar = job.payload.customJar as { uploadId: string; filename: string } | undefined;
     const pack = modpackInput ? await resolveCurseForgeModpack(server, modpackInput.projectId, modpackInput.slug, server.version.toUpperCase() === 'LATEST' ? undefined : server.version) : undefined;
     if (pack && pack.minecraftVersion !== server.version) await store.update((draft) => { const item = draft.servers.find((entry) => entry.id === server.id); if (item) item.version = pack.minecraftVersion; });
     const current = await new NodeClient(node).state(server).catch(() => ({ status: 'missing' as const }));
-    await updateJob(id, 45, pack ? `Installation du server pack ${pack.filename}` : customJar ? 'Création du conteneur avec jar personnalisé' : server.platform === 'steamcmd' ? `Installation SteamCMD de ${server.steam?.gameName ?? 'ce jeu'}` : 'Création du conteneur Minecraft');
+    await updateJob(id, 45, pack ? `Installation du server pack ${pack.filename}` : server.platform === 'steamcmd' ? `Installation SteamCMD de ${server.steam?.gameName ?? 'ce jeu'}` : 'Création du conteneur Minecraft');
     if (current.status === 'missing') await new NodeClient(node).create(findServer(server.id)!, pack);
-    if (customJar) {
-      const jarPath = path.join(jarsDir, `${customJar.uploadId}.jar`);
-      const jarContent = await readFile(jarPath);
-      await updateJob(id, 70, `Installation du jar personnalisé (${customJar.filename})`);
-      await new NodeClient(node).uploadFile(server, 'server.jar', jarContent);
-    }
     await new NodeClient(node).updateCrashPolicy(server, server.crashPolicy);
     await updateJob(id, 90, server.platform === 'minecraft' ? 'Synchronisation de la passerelle' : 'Finalisation du serveur SteamCMD'); await gateway.sync(store.snapshot);
-    if (customJar) await unlink(path.join(jarsDir, `${customJar.uploadId}.jar`)).catch(() => undefined);
-    await recordAudit(job.userId, 'server.create', 'server', server.id, { nodeId: node.id, jobId: job.id, platform: server.platform, steamAppId: server.steam?.appId, serverPack: pack?.filename, customJar: customJar?.filename });
+    await recordAudit(job.userId, 'server.create', 'server', server.id, { nodeId: node.id, jobId: job.id, platform: server.platform, steamAppId: server.steam?.appId, serverPack: pack?.filename });
     return { serverId: server.id, platform: server.platform, steamAppId: server.steam?.appId, serverPack: pack?.filename };
   }
   if (job.kind === 'backup.create') {

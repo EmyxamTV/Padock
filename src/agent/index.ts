@@ -215,6 +215,13 @@ app.post('/v1/servers/:id/files/rename', async (request, reply) => {
   await files.move(id, parsed.data.source, parsed.data.destination); return { ok: true };
 });
 
+app.post('/v1/servers/:id/files/jar', async (request, reply) => {
+  const id = parseId(request.params, reply); if (!id) return;
+  const parsed = z.object({ path: z.string().min(1).max(500) }).safeParse(request.body);
+  if (!parsed.success) return reply.code(400).send({ error: 'Chemin invalide.' });
+  await files.chooseServerJar(id, parsed.data.path); return { ok: true };
+});
+
 app.post('/v1/servers/:id/files/directory', async (request, reply) => {
   const id = parseId(request.params, reply); if (!id) return;
   const parsed = z.object({ path: z.string().min(1).max(500) }).safeParse(request.body);

@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { io as connectSocket } from 'socket.io-client';
-import { api, type AuditEntry, type GatewayStatus, type NetworkAllocation, type NodeRecord, type PanelJob, type PanelNotification, type PanelPermission, type PanelRole, type Server, type UserDirectoryEntry, type UserGroup, type UserRecord, upload } from './api';
+import { api, type AuditEntry, type GatewayStatus, type NetworkAllocation, type NodeRecord, type PanelJob, type PanelNotification, type PanelPermission, type PanelRole, type Server, type UserDirectoryEntry, type UserGroup, type UserRecord } from './api';
 import { Auth } from './components/Auth';
 import { CreateServer } from './components/CreateServer';
 import { ServerCard } from './components/ServerCard';
@@ -70,20 +70,11 @@ export function App() {
       const modpackProjectId = Number(form.get('modpackProjectId'));
       const modpackSlug = String(form.get('modpackSlug') ?? '');
       const subdomain = String(form.get('subdomain') ?? '').trim();
-      const jarFile = form.get('jarFile');
-      let customJar: { uploadId: string; filename: string } | undefined;
-      if (form.get('software') === 'CUSTOM') {
-        if (!(jarFile instanceof File) || !jarFile.size) throw new Error('Choisissez un fichier jar avant de créer le serveur.');
-        if (jarFile.size > 128 * 1024 * 1024) throw new Error('Le jar personnalisé dépasse la limite de 128 Mo.');
-        const staged = await upload<{ uploadId: string }>(`/api/jars?filename=${encodeURIComponent(jarFile.name)}`, jarFile);
-        customJar = { uploadId: staged.uploadId, filename: jarFile.name };
-      }
       const server = await api<Server>('/api/servers', { method: 'POST', body: JSON.stringify({
         name: form.get('name'), platform: form.get('platform'), software: form.get('software'), version: form.get('version'), steamGameId: form.get('steamGameId') || undefined, nodeId: form.get('nodeId'), ownerId: form.get('ownerId'),
         memoryMb: Number(form.get('memoryMb')), cpuPercent: Number(form.get('cpuPercent')), diskMb: Number(form.get('diskMb')),
         allocationId: form.get('allocationId'), subdomain: subdomain || undefined,
         modpack: modpackProjectId > 0 && modpackSlug ? { projectId: modpackProjectId, slug: modpackSlug } : undefined,
-        customJar,
       }) });
       setServers((current) => [...current, server]); setCreating(false); setCreateError(''); setSelectedId(server.id);
     } catch (err) { setCreateError((err as Error).message); }

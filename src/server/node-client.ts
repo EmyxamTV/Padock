@@ -82,6 +82,7 @@ export class NodeClient {
   uploadFile(server: MinecraftServer, relative: string, content: Buffer) { return this.request<{ ok: true }>(`/v1/servers/${server.id}/files/upload?path=${encodeURIComponent(relative)}`, { method: 'PUT', body: Uint8Array.from(content), headers: { 'Content-Type': 'application/octet-stream' } }, 10 * 60_000); }
   downloadFile(server: MinecraftServer, relative: string) { return this.requestBuffer(`/v1/servers/${server.id}/files/download?path=${encodeURIComponent(relative)}`, 10 * 60_000); }
   renameFile(server: MinecraftServer, source: string, destination: string) { return this.request<{ ok: true }>(`/v1/servers/${server.id}/files/rename`, { method: 'POST', body: JSON.stringify({ source, destination }) }); }
+  chooseServerJar(server: MinecraftServer, relative: string) { return this.request<{ ok: true }>(`/v1/servers/${server.id}/files/jar`, { method: 'POST', body: JSON.stringify({ path: relative }) }); }
   makeDirectory(server: MinecraftServer, relative: string) { return this.request<{ ok: true }>(`/v1/servers/${server.id}/files/directory`, { method: 'POST', body: JSON.stringify({ path: relative }) }); }
   deleteFile(server: MinecraftServer, relative: string) { return this.request<{ ok: true }>(`/v1/servers/${server.id}/files`, { method: 'DELETE', body: JSON.stringify({ path: relative }) }); }
   runtime(server: MinecraftServer) { return this.request<{ minecraftVersion?: string }>(`/v1/servers/${server.id}/runtime`); }

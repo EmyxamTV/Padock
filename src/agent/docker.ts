@@ -71,6 +71,7 @@ export class NodeDocker {
       'EULA=TRUE', `TYPE=${input.software}`, `VERSION=${input.version}`, ...javaMemoryEnvironment(input.memoryMb),
       'ENABLE_RCON=true', 'ONLINE_MODE=true', 'USE_AIKAR_FLAGS=true',
     ];
+    if (input.software === 'CUSTOM') env.push('CUSTOM_SERVER=/data/server.jar');
     if (genericPack) env.push(`GENERIC_PACK=${genericPack}`, 'USE_MODPACK_START_SCRIPT=true');
     const labels: Record<string, string> = { 'padock.managed': 'true', 'padock.platform': 'minecraft', 'padock.server-id': input.id, 'padock.server-name': input.name, 'padock.memory-mb': String(input.memoryMb), 'padock.disk-mb': String(input.diskMb), 'padock.cpu-percent': String(input.cpuPercent) };
     if (serverPack) {

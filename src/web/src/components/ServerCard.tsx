@@ -4,7 +4,7 @@ import { serverDiagnostic, serverStatusLabels } from '../server-status';
 
 export function ServerCard({ server, onClick }: { server: Server; onClick: () => void }) {
   const diagnostic = serverDiagnostic(server);
-  const description = server.platform === 'steamcmd' ? `${server.steam?.gameName ?? server.version} · SteamCMD` : `${server.software} · ${server.version}`;
+  const description = server.platform === 'steamcmd' ? `${server.steam?.gameName ?? server.version} · SteamCMD` : server.software === 'CUSTOM' ? 'Jar personnalisé' : `${server.software} · ${server.version}`;
   return <button className="server-card" onClick={onClick}>
     <div className="server-card-head"><div className="server-avatar">{server.platform === 'steamcmd' ? 'S' : '▧'}</div><span className={`badge ${server.status}`}><span />{serverStatusLabels[server.status]}</span></div>
     <h3>{server.name}</h3><p>{description}</p>
