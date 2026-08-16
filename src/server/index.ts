@@ -802,6 +802,22 @@ app.put('/api/servers/:id/resources', { preHandler: auth }, async (request, repl
   return { ok: true };
 });
 
+app.post('/api/servers/:id/ports', { preHandler: auth }, async (request, reply) => {
+  const server = authorizedServer(request, reply, (request.params as { id: string }).id, 'settings.manage'); if (!server) return;
+  const parsed = z.object({ internalPort: z.number().int().min(1).max(65535), protocol: z.enum(['tcp', 'udp']), hostPort: z.number().int().min(1024).max(65535).optional() }).safeParse(request.body);
+  if (!parsed.success) return reply.code(400).send({ error: 'Port invalide.' });
+  if (server.platform === 'steamcmd') return reply.code(409).send({ error: 'Les ports des serveurs SteamCMD sont définis par le preset du jeu.' });
+  if (parsed.data.internalPort === 25565 && parsed.data.protocol === 'tcp') return reply.code(409).send({ error: 'Le port du jeu est déjà exposé.' });
+  const wanted = [...server.ports.filter((port) => !(port.internalPort === 25565 && port.protocol === 'tcp')).map((port) => ({ internalPort: port.internalPort, protocol: port.protocol, hostPort: port.hostPort })), parsed.data];
+  const result = await clientFor(server).updatePorts(server, wanted);
+  await store.update((draft) => {
+    const item = draft.servers.find((entry) => entry.id === server.id);
+    if (item) item.ports = [{ name: 'Minecraft', internalPort: 25565, hostPort: item.port, protocol: 'tcp', allocationId: item.allocationId }, ...result.ports.map((port) => ({ name: `Port ${port.internalPort}`, internalPort: port.internalPort, hostPort: port.hostPort, protocol: port.protocol }))];
+  });
+  await recordAudit(currentUser(request)?.id, 'server.ports_update', 'server', server.id, { internalPort: parsed.data.internalPort, protocol: parsed.data.protocol });
+  return { ok: true, ports: result.ports };
+});
+
 app.get('/api/servers/:id/files', { preHandler: auth }, async (request, reply) => {
   const server = authorizedServer(request, reply, (request.params as { id: string }).id, 'files.read'); if (!server) return;
   return clientFor(server).files(server, String((request.query as { path?: string }).path ?? ''));

@@ -73,6 +73,7 @@ export class NodeClient {
   state(server: MinecraftServer) { return this.request<RemoteServerState>(`/v1/servers/${server.id}/status`); }
   updateResources(server: MinecraftServer, input: { memoryMb: number; cpuPercent: number; diskMb: number }) { return this.request<{ ok: true }>(`/v1/servers/${server.id}/resources`, { method: 'PUT', body: JSON.stringify(input) }, 60_000); }
   updateCrashPolicy(server: MinecraftServer, input: { enabled: boolean; maxRestarts: number }) { return this.request<{ ok: true }>(`/v1/servers/${server.id}/crash-policy`, { method: 'PUT', body: JSON.stringify(input) }); }
+  updatePorts(server: MinecraftServer, ports: Array<{ internalPort: number; protocol: 'tcp' | 'udp'; hostPort?: number }>) { return this.request<{ ports: Array<{ internalPort: number; protocol: 'tcp' | 'udp'; hostPort: number }> }>(`/v1/servers/${server.id}/ports`, { method: 'PUT', body: JSON.stringify({ ports }) }, 60_000); }
 
   stats(server: MinecraftServer) { return this.request<ServerStats>(`/v1/servers/${server.id}/stats`); }
   metrics(server: MinecraftServer) { return this.request<ServerStats & { status: RemoteServerState['status']; playersOnline?: number; playersMax?: number }>(`/v1/servers/${server.id}/metrics`, {}, 30_000); }

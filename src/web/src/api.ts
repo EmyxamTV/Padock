@@ -10,7 +10,7 @@ export interface Server {
   port: number;
   address?: string;
   domain?: string;
-  ports: Array<{ name: string; internalPort: number; hostPort: number; protocol: 'tcp' | 'udp'; allocationId: string }>;
+  ports: Array<{ name: string; internalPort: number; hostPort: number; protocol: 'tcp' | 'udp'; allocationId?: string }>;
   steam?: { presetId: string; gameName: string; appId: number; startupCommand: string };
   allocationId: string;
   ownerId: string;

@@ -120,7 +120,7 @@ export function ServerDetail({ server, gateway, nodes, users, onChanged, onDelet
     {tab === 'monitoring' && <MonitoringPanel server={server} />}
     {tab === 'files' && <FilesPanel server={server} />}
     {tab === 'content' && canContent && supportsContent && <ContentPanel server={server} />}
-    {tab === 'settings' && canSettings && <div className="settings-stack"><ServerManagementPanel server={server} gateway={gateway} onChanged={onChanged} />{server.platform === 'steamcmd' && <SteamRuntimePanel server={server} />}<PoliciesPanel server={server} onChanged={onChanged} />{server.platform === 'minecraft' && <LifecyclePanel server={server} nodes={nodes} onChanged={onChanged} />}<ResourcesPanel server={server} onChanged={onChanged} />{server.platform === 'minecraft' && <PropertiesPanel server={server} />}</div>}
+    {tab === 'settings' && canSettings && <div className="settings-stack"><ServerManagementPanel server={server} gateway={gateway} onChanged={onChanged} />{server.platform === 'steamcmd' && <SteamRuntimePanel server={server} />}<PoliciesPanel server={server} onChanged={onChanged} />{server.platform === 'minecraft' && <LifecyclePanel server={server} nodes={nodes} onChanged={onChanged} />}<ResourcesPanel server={server} onChanged={onChanged} />{server.platform === 'minecraft' && <PortsPanel server={server} onChanged={onChanged} />}{server.platform === 'minecraft' && <PropertiesPanel server={server} />}</div>}
     {tab === 'backups' && <BackupsPanel server={server} />}
     {tab === 'schedules' && <SchedulesPanel server={server} />}
     {tab === 'sftp' && canSftp && <SftpPanel server={server} />}
@@ -293,6 +293,16 @@ function PropertiesPanel({ server }: { server: Server }) {
   return <section className="content-panel properties-panel"><div className="content-toolbar"><div><h2>server.properties</h2><small>Les réglages principaux sans éditer le fichier à la main</small></div></div>{error && <div className="alert">{error}</div>}{message && <div className="success-banner">{message}</div>}{loading ? <p className="panel-empty">Chargement des propriétés…</p> : <form onSubmit={save}><div className="properties-grid">{propertyDefinitions.map((item) => <label key={item.key}><span>{item.label}</span><small>{item.description}</small>{item.options ? <select value={values[item.key] ?? ''} onChange={(event) => setValues({ ...values, [item.key]: event.target.value })}>{item.options.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select> : <input type={item.type ?? 'text'} min={item.min} max={item.max} value={values[item.key] ?? ''} onChange={(event) => setValues({ ...values, [item.key]: event.target.value })}/>}</label>)}</div><div className="properties-actions"><span>Un redémarrage peut être nécessaire.</span><button className="primary" disabled={busy}>{busy ? 'Enregistrement…' : 'Enregistrer les propriétés'}</button></div></form>}</section>;
 }
 
+function PortsPanel({ server, onChanged }: { server: Server; onChanged: () => void }) {
+  const [internalPort, setInternalPort] = useState(8163);
+  const [protocol, setProtocol] = useState<'tcp' | 'udp'>('tcp');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  async function add(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setBusy(true); setError(''); setMessage(''); try { const result = await api<{ ports: Array<{ internalPort: number; hostPort: number; protocol: string }> }>(`/api/servers/${server.id}/ports`, { method: 'POST', body: JSON.stringify({ internalPort, protocol }) }); const added = result.ports.find((port) => port.internalPort === internalPort); setMessage(`Port exposé${added ? ` : ${internalPort} → ${added.hostPort}` : ''}. Relancez le serveur pour l’appliquer.`); onChanged(); } catch (err) { setError((err as Error).message); } finally { setBusy(false); } }
+  return <section className="content-panel ports-panel"><div className="content-toolbar"><div><h2>Ports exposés</h2><small>Ports supplémentaires du conteneur, joignables publiquement (resource packs, self-host…)</small></div></div>{error && <div className="alert">{error}</div>}{message && <div className="success-banner">{message}</div>}<ul className="port-list">{server.ports.map((port) => <li key={`${port.internalPort}/${port.protocol}`}><span><strong>{port.name}</strong><small>{port.internalPort}/{port.protocol} → port externe {port.hostPort}</small></span></li>)}</ul><form className="port-form" onSubmit={add}><div className="form-row"><label>Port interne<input type="number" min={1} max={65535} value={internalPort} onChange={(event) => setInternalPort(Number(event.target.value))} /></label><label>Protocole<select value={protocol} onChange={(event) => setProtocol(event.target.value as 'tcp' | 'udp')}><option value="tcp">TCP</option><option value="udp">UDP</option></select></label></div><div className="properties-actions"><span>Le conteneur est recréé avec les mêmes réglages.</span><button className="primary" disabled={busy || server.status !== 'stopped'}>{busy ? 'Ajout…' : server.status !== 'stopped' ? 'Arrêtez le serveur pour ajouter' : 'Exposer ce port'}</button></div></form></section>;
+}
+
 function SftpPanel({ server }: { server: Server }) {
   const [data, setData] = useState<SftpAccountsResponse>();
   const [editing, setEditing] = useState<SftpAccount | 'new' | null>(null);
@@ -445,7 +455,7 @@ function activityLabel(action: string) {
   const labels: Record<string, string> = {
     'server.installing': 'Création en cours', 'server.create': 'Serveur créé', 'server.install_failed': 'Échec de la création',
     'server.start': 'Serveur démarré', 'server.stop': 'Serveur arrêté', 'server.restart': 'Serveur redémarré', 'server.kill': 'Arrêt forcé',
-    'server.repair': 'Conteneur réparé', 'server.rename': 'Serveur renommé', 'server.domain_update': 'Adresse de connexion modifiée', 'server.resources_update': 'Ressources modifiées',
+    'server.repair': 'Conteneur réparé', 'server.rename': 'Serveur renommé', 'server.domain_update': 'Adresse de connexion modifiée', 'server.resources_update': 'Ressources modifiées', 'server.ports_update': 'Ports modifiés',
     'server.properties_update': 'Propriétés modifiées', 'server.command': 'Commande exécutée', 'server.member_update': 'Accès partagé modifié', 'server.member_remove': 'Accès partagé retiré', 'server.jar_set': 'Jar du serveur défini',
     'backup.create': 'Sauvegarde créée', 'backup.restore': 'Sauvegarde restaurée', 'backup.delete': 'Sauvegarde supprimée',
     'content.install': 'Extension installée', 'content.delete': 'Extension supprimée', 'content.modpack_configure': 'Modpack installé',

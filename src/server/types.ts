@@ -7,7 +7,7 @@ export interface ServerPort {
   internalPort: number;
   hostPort: number;
   protocol: ServerPortProtocol;
-  allocationId: string;
+  allocationId?: string;
 }
 
 export interface SteamServerConfig {

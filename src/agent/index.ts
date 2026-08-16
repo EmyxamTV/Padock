@@ -3,7 +3,7 @@ import path from 'node:path';
 import { stat } from 'node:fs/promises';
 import Fastify from 'fastify';
 import { z } from 'zod';
-import { NodeDocker } from './docker.js';
+import { NodeDocker, MINECRAFT_INTERNAL_PORT } from './docker.js';
 import { ServerFiles } from './files.js';
 import { SftpAccountRegistry, startSftpServer } from './sftp.js';
 import { padockEnv } from './config.js';
@@ -170,7 +170,8 @@ app.get('/v1/servers/:id/metrics', async (request, reply) => {
   if (state.status !== 'running') return { status: state.status, cpuPercent: 0, memoryBytes: 0, memoryLimitBytes: 0, networkRxBytes: 0, networkTxBytes: 0, diskBytes };
   const stats = await docker.stats(id); let playersOnline: number | undefined; let playersMax: number | undefined;
   if (await docker.platform(id).catch(() => 'minecraft') === 'minecraft') {
-    try { const output = await docker.command(id, 'list'); const match = output.match(/(?:There are|Il y a)\s+(\d+)\s+(?:of a max of|sur un maximum de)\s+(\d+)/i); if (match) { playersOnline = Number(match[1]); playersMax = Number(match[2]); } } catch { /* RCON peut ne pas être encore prêt. */ }
+    const players = await docker.minecraftStatus(id).catch(() => null);
+    if (players) { playersOnline = players.online; playersMax = players.max; }
   }
   return { status: state.status, ...stats, diskBytes, playersOnline, playersMax };
 });
@@ -358,8 +359,17 @@ app.post('/v1/servers/:id/:action', async (request, reply) => {
   const id = parseId(request.params, reply); if (!id) return;
   const action = (request.params as { action: string }).action;
   if (!['start', 'stop', 'restart', 'kill'].includes(action)) return reply.code(404).send({ error: 'Action inconnue.' });
+  if (action === 'start' || action === 'restart') await files.ensureServerPort(id, MINECRAFT_INTERNAL_PORT);
   await docker.action(id, action as 'start' | 'stop' | 'restart' | 'kill');
   return { ok: true };
+});
+
+app.put('/v1/servers/:id/ports', async (request, reply) => {
+  const id = parseId(request.params, reply); if (!id) return;
+  const parsed = z.object({ ports: z.array(z.object({ internalPort: z.number().int().min(1).max(65535), protocol: z.enum(['tcp', 'udp']), hostPort: z.number().int().min(1024).max(65535).optional() })).max(10) }).safeParse(request.body);
+  if (!parsed.success) return reply.code(400).send({ error: 'Ports invalides.' });
+  if (await docker.status(id) !== 'stopped') return reply.code(409).send({ error: 'Arrêtez le serveur avant de modifier ses ports.' });
+  return { ports: await docker.updatePorts(id, parsed.data.ports) };
 });
 
 app.post('/v1/servers/:id/command', async (request, reply) => {

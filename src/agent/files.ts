@@ -58,6 +58,16 @@ export class ServerFiles {
     await this.applyOwnership(serverId, target);
   }
 
+  async ensureServerPort(serverId: string, internalPort: number) {
+    try {
+      const current = (await this.readBuffer(serverId, 'server.properties')).content.toString('utf8');
+      const updated = current.split(/\r?\n/).map((line) => /^server-port\s*=/.test(line) ? `server-port=${internalPort}` : line).join('\n');
+      if (updated !== current) await this.writeBuffer(serverId, 'server.properties', Buffer.from(updated, 'utf8'));
+    } catch {
+      // server.properties n'existe pas encore : le serveur le générera avec le port correct.
+    }
+  }
+
   async readBuffer(serverId: string, relative: string) {
     const target = this.target(serverId, relative);
     await this.assertNotSymlink(target);

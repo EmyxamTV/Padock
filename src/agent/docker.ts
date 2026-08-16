@@ -1,5 +1,6 @@
 import { mkdir, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
+import net from 'node:net';
 import Docker from 'dockerode';
 import { padockEnv } from './config.js';
 
@@ -7,6 +8,7 @@ const IMAGE = padockEnv('MINECRAFT_IMAGE') ?? 'itzg/minecraft-server:java25';
 const STEAMCMD_IMAGE = padockEnv('STEAMCMD_IMAGE') ?? 'steamcmd/steamcmd:ubuntu-22';
 const GATEWAY_ENABLED = padockEnv('GATEWAY_ENABLED') === 'true';
 const GATEWAY_BACKEND_BIND = padockEnv('GATEWAY_BACKEND_BIND')?.trim() || '127.0.0.1';
+export const MINECRAFT_INTERNAL_PORT = 25565;
 
 interface DockerServerPort {
   name: string;
@@ -81,15 +83,23 @@ export class NodeDocker {
       labels['padock.modpack-file-id'] = String(serverPack.fileId);
       labels['padock.modpack-filename'] = serverPack.filename;
     }
+    const ports = input.ports.length ? input.ports : [{ name: 'Minecraft', internalPort: MINECRAFT_INTERNAL_PORT, hostPort: input.port, protocol: 'tcp' as const, allocationId: '' }];
+    const exposedPorts: Record<string, object> = {};
+    const portBindings: Record<string, Array<{ HostIp?: string; HostPort?: string }>> = {};
+    for (const port of ports) {
+      const key = `${port.internalPort}/${port.protocol}`;
+      exposedPorts[key] = {};
+      portBindings[key] = [{ HostIp: GATEWAY_ENABLED && port.internalPort === MINECRAFT_INTERNAL_PORT ? GATEWAY_BACKEND_BIND : undefined, HostPort: String(port.hostPort) }];
+    }
     const container = await this.docker.createContainer({
       name: this.containerName(input.id),
       Image: IMAGE,
       Env: env,
       Labels: labels,
-      ExposedPorts: { '25565/tcp': {} },
+      ExposedPorts: exposedPorts,
       HostConfig: {
         Binds: [`${serverDir}:/data`],
-        PortBindings: { '25565/tcp': [{ HostIp: GATEWAY_ENABLED ? GATEWAY_BACKEND_BIND : undefined, HostPort: String(input.port) }] },
+        PortBindings: portBindings,
         RestartPolicy: { Name: 'unless-stopped' },
         Memory: input.memoryMb * 1024 * 1024,
         MemorySwap: input.memoryMb * 1024 * 1024,
@@ -342,6 +352,39 @@ export class NodeDocker {
     return (await this.container(id)).logs({ follow: true, stdout: true, stderr: true, timestamps: false, tail });
   }
 
+  async minecraftStatus(id: string) {
+    const info = await (await this.container(id)).inspect();
+    const binding = (info.NetworkSettings?.Ports?.[`${MINECRAFT_INTERNAL_PORT}/tcp`] ?? []).find((entry) => entry !== undefined);
+    const host = binding?.HostIp === '0.0.0.0' || binding?.HostIp == null ? '127.0.0.1' : binding.HostIp;
+    const port = Number(binding?.HostPort ?? MINECRAFT_INTERNAL_PORT);
+    return statusPing(host, port, 3000);
+  }
+
+  async updatePorts(id: string, ports: Array<{ internalPort: number; protocol: 'tcp' | 'udp'; hostPort?: number }>) {
+    const container = await this.container(id);
+    const info = await container.inspect();
+    if (readLabel(info.Config.Labels, 'platform') === 'steamcmd') throw Object.assign(new Error('Les ports des serveurs SteamCMD sont définis par le preset du jeu.'), { statusCode: 409 });
+    const current = (info.HostConfig.PortBindings as Record<string, Array<{ HostIp?: string; HostPort?: string }> | null> | undefined) ?? {};
+    const gameKey = `${MINECRAFT_INTERNAL_PORT}/tcp`;
+    const bindings: Record<string, Array<{ HostIp?: string; HostPort?: string }>> = {};
+    const exposed: Record<string, object> = {};
+    if (current[gameKey]) { bindings[gameKey] = current[gameKey]!.map((binding) => ({ ...binding })); exposed[gameKey] = {}; }
+    for (const port of ports) {
+      const key = `${port.internalPort}/${port.protocol}`;
+      const existing = current[key]?.[0]?.HostPort ? Number(current[key]![0]!.HostPort) : undefined;
+      const hostPort = port.hostPort ?? existing ?? await findFreeHostPort(port.internalPort);
+      bindings[key] = [{ HostIp: undefined, HostPort: String(hostPort) }];
+      exposed[key] = {};
+    }
+    info.Config.ExposedPorts = exposed;
+    info.HostConfig.PortBindings = bindings;
+    await this.recreate(info, info.Config.Env ?? [], info.Config.Labels ?? {});
+    return Object.keys(bindings).filter((key) => key !== gameKey).map((key) => {
+      const [internalPort, protocol] = key.split('/');
+      return { internalPort: Number(internalPort), protocol: protocol as 'tcp' | 'udp', hostPort: Number(bindings[key]![0]!.HostPort ?? 0) };
+    });
+  }
+
   async platform(id: string) {
     const info = await (await this.container(id)).inspect();
     return readLabel(info.Config.Labels, 'platform') === 'steamcmd' ? 'steamcmd' as const : 'minecraft' as const;
@@ -403,7 +446,7 @@ export class NodeDocker {
     const memoryBytes = memoryMb ? memoryMb * 1024 * 1024 : info.HostConfig.Memory;
     const originalPortBindings = info.HostConfig.PortBindings as Record<string, Array<{ HostIp?: string; HostPort?: string }> | null> | undefined;
     const portBindings = GATEWAY_ENABLED && readLabel(labels, 'platform') !== 'steamcmd'
-      ? Object.fromEntries(Object.entries(originalPortBindings ?? {}).map(([key, bindings]) => [key, bindings?.map((binding) => ({ ...binding, HostIp: GATEWAY_BACKEND_BIND })) ?? []]))
+      ? Object.fromEntries(Object.entries(originalPortBindings ?? {}).map(([key, bindings]) => [key, bindings?.map((binding) => key === `${MINECRAFT_INTERNAL_PORT}/tcp` ? { ...binding, HostIp: GATEWAY_BACKEND_BIND } : { ...binding }) ?? []]))
       : info.HostConfig.PortBindings;
     await this.docker.createContainer({
       name: info.Name.replace(/^\//, ''),
@@ -483,6 +526,98 @@ async function directorySize(directory: string): Promise<number> {
     else if (entry.isFile()) total += (await stat(target)).size;
   }
   return total;
+}
+
+function writeVarInt(value: number): Buffer {
+  const bytes: number[] = [];
+  let remaining = value >>> 0;
+  do {
+    let byte = remaining & 0x7f;
+    remaining >>>= 7;
+    if (remaining !== 0) byte |= 0x80;
+    bytes.push(byte);
+  } while (remaining !== 0);
+  return Buffer.from(bytes);
+}
+
+function readVarInt(buffer: Buffer, offset: number) {
+  let value = 0;
+  let shift = 0;
+  let index = offset;
+  while (index < buffer.length) {
+    const byte = buffer[index++]!;
+    value |= (byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) break;
+    shift += 7;
+  }
+  return { value: value >>> 0, offset: index };
+}
+
+function statusPing(host: string, port: number, timeoutMs: number): Promise<{ online: number; max: number } | null> {
+  return new Promise((resolve) => {
+    const socket = net.connect(port, host);
+    let settled = false;
+    let timer: NodeJS.Timeout;
+    const finish = (result: { online: number; max: number } | null) => { if (!settled) { settled = true; clearTimeout(timer); socket.destroy(); resolve(result); } };
+    timer = setTimeout(() => finish(null), timeoutMs);
+    socket.on('connect', () => {
+      try {
+        const address = Buffer.from(host, 'utf8');
+        const handshake = Buffer.concat([writeVarInt(0), writeVarInt(-1), writeVarInt(address.length), address, ushort(port), writeVarInt(1)]);
+        socket.write(Buffer.concat([writeVarInt(handshake.length), handshake, writeVarInt(1), writeVarInt(0)]));
+      } catch { finish(null); }
+    });
+    let received = Buffer.alloc(0);
+    socket.on('data', (chunk) => {
+      received = Buffer.concat([received, chunk]);
+      try {
+        const { value: frameLength, offset: afterLength } = readVarInt(received, 0);
+        if (afterLength + frameLength > received.length) return;
+        const { value: packetId, offset: afterId } = readVarInt(received, afterLength);
+        if (packetId !== 0) return finish(null);
+        const { value: jsonLength, offset: jsonStart } = readVarInt(received, afterId);
+        if (jsonStart + jsonLength > received.length) return;
+        const status = JSON.parse(received.subarray(jsonStart, jsonStart + jsonLength).toString('utf8')) as { players?: { online?: number; max?: number } };
+        finish(status.players?.online != null && status.players?.max != null ? { online: status.players.online, max: status.players.max } : null);
+      } catch { return; }
+    });
+    socket.on('error', () => finish(null));
+    socket.on('close', () => finish(null));
+  });
+}
+
+function ushort(value: number): Buffer {
+  const buffer = Buffer.alloc(2);
+  buffer.writeUInt16BE(value);
+  return buffer;
+}
+
+function findFreeHostPort(preferred: number) {
+  return isPortListening(preferred).then((occupied) => occupied ? ephemeralFreePort() : preferred);
+}
+
+function isPortListening(port: number) {
+  return new Promise<boolean>((resolve) => {
+    const socket = net.createConnection({ host: '127.0.0.1', port });
+    socket.setTimeout(500);
+    const done = (result: boolean) => { socket.destroy(); resolve(result); };
+    socket.once('connect', () => done(true));
+    socket.once('timeout', () => done(false));
+    socket.once('error', () => done(false));
+  });
+}
+
+function ephemeralFreePort() {
+  return new Promise<number>((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.once('error', reject);
+    server.listen(0, '0.0.0.0', () => {
+      const address = server.address() as net.AddressInfo;
+      const port = address.port;
+      server.close(() => resolve(port));
+    });
+  });
 }
 
 async function existingServerPack(dataDir: string, id: string) {
