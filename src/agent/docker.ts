@@ -378,7 +378,16 @@ export class NodeDocker {
     }
     info.Config.ExposedPorts = exposed;
     info.HostConfig.PortBindings = bindings;
-    await this.recreate(info, info.Config.Env ?? [], info.Config.Labels ?? {});
+    const originalExposed = info.Config.ExposedPorts;
+    const originalBindings = info.HostConfig.PortBindings;
+    await container.remove({ force: true });
+    try { await this.recreate(info, info.Config.Env ?? [], info.Config.Labels ?? {}); }
+    catch (error) {
+      info.Config.ExposedPorts = originalExposed;
+      info.HostConfig.PortBindings = originalBindings;
+      await this.recreate(info, info.Config.Env ?? [], info.Config.Labels ?? {}).catch(() => undefined);
+      throw error;
+    }
     return Object.keys(bindings).filter((key) => key !== gameKey).map((key) => {
       const [internalPort, protocol] = key.split('/');
       return { internalPort: Number(internalPort), protocol: protocol as 'tcp' | 'udp', hostPort: Number(bindings[key]![0]!.HostPort ?? 0) };
