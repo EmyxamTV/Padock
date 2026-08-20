@@ -34,13 +34,17 @@ export class Store {
     if (Number(count.rows[0]?.count ?? 0) === 0 && hasData(legacy)) {
       this.state = normalize(legacy);
       await this.savePostgres();
+      this.state.metrics = [];
     } else {
       this.state = await this.loadPostgres();
     }
   }
 
   get snapshot(): PanelState {
-    return structuredClone(this.state);
+    // Les appels de lecture sont très fréquents (authentification, métriques,
+    // sockets, listes). Retourner une copie profonde ici dupliquait aussi les
+    // milliers d'échantillons de monitoring à chaque accès.
+    return this.state;
   }
 
   async tryBecomeLeader() {
@@ -63,6 +67,41 @@ export class Store {
     await this.transaction((draft) => mutator(draft));
   }
 
+  async metricsForServer(serverId: string, since: number) {
+    if (!this.pool) return downsampleMetrics(this.state.metrics.filter((item) => item.serverId === serverId && new Date(item.createdAt).getTime() >= since));
+    const result = await this.pool.query('SELECT * FROM metric_samples WHERE server_id=$1 AND created_at >= $2 ORDER BY created_at', [serverId, new Date(since).toISOString()]);
+    return downsampleMetrics(result.rows.map(metricFromRow));
+  }
+
+  async recordMetrics(samples: MetricSample[], cutoff: number) {
+    if (!this.pool) {
+      await this.update((draft) => { draft.metrics.push(...samples); draft.metrics = draft.metrics.filter((item) => new Date(item.createdAt).getTime() >= cutoff).slice(-100_000); });
+      return;
+    }
+    let resolveResult!: () => void;
+    let rejectResult!: (reason: unknown) => void;
+    const result = new Promise<void>((resolve, reject) => { resolveResult = resolve; rejectResult = reject; });
+    this.queue = this.queue.catch(() => undefined).then(async () => {
+      let client: pg.PoolClient | undefined;
+      try {
+        client = await this.pool!.connect();
+        await client.query('BEGIN');
+        if (samples.length) await client.query(
+          `INSERT INTO metric_samples (id,server_id,status,cpu_percent,memory_bytes,memory_limit_bytes,network_rx_bytes,network_tx_bytes,disk_bytes,players_online,players_max,created_at)
+           SELECT id,server_id,status,cpu_percent,memory_bytes,memory_limit_bytes,network_rx_bytes,network_tx_bytes,disk_bytes,players_online,players_max,created_at
+           FROM jsonb_to_recordset($1::jsonb) AS sample(id text,server_id text,status text,cpu_percent real,memory_bytes bigint,memory_limit_bytes bigint,network_rx_bytes bigint,network_tx_bytes bigint,disk_bytes bigint,players_online integer,players_max integer,created_at timestamptz)
+           ON CONFLICT (id) DO NOTHING`,
+          [JSON.stringify(samples.map((sample) => ({ id: sample.id, server_id: sample.serverId, status: sample.status, cpu_percent: sample.cpuPercent, memory_bytes: sample.memoryBytes, memory_limit_bytes: sample.memoryLimitBytes, network_rx_bytes: sample.networkRxBytes, network_tx_bytes: sample.networkTxBytes, disk_bytes: sample.diskBytes, players_online: sample.playersOnline ?? null, players_max: sample.playersMax ?? null, created_at: sample.createdAt })))],
+        );
+        await client.query('DELETE FROM metric_samples WHERE created_at < $1', [new Date(cutoff).toISOString()]);
+        await client.query('COMMIT');
+        resolveResult();
+      } catch (error) { if (client) await client.query('ROLLBACK').catch(() => undefined); rejectResult(error); }
+      finally { client?.release(); }
+    });
+    return result;
+  }
+
   /** Sérialise la mutation complète, pas uniquement l'écriture disque. */
   async transaction<T>(mutator: (draft: PanelState) => T | Promise<T>): Promise<T> {
     let resolveResult!: (value: T) => void;
@@ -74,7 +113,7 @@ export class Store {
         const value = await mutator(draft);
         const previous = this.state;
         this.state = draft;
-        try { await this.persist(); }
+        try { await this.persist(previous); }
         catch (error) { this.state = previous; throw error; }
         resolveResult(value);
       } catch (error) { rejectResult(error); }
@@ -87,7 +126,7 @@ export class Store {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; return {}; }
   }
 
-  private async persist() { return this.pool ? this.savePostgres() : this.saveJson(); }
+  private async persist(previous: PanelState) { return this.pool ? this.savePostgres(previous) : this.saveJson(); }
 
   private async saveJson() {
     const temporary = `${this.file}.tmp`;
@@ -223,6 +262,7 @@ export class Store {
       CREATE INDEX IF NOT EXISTS jobs_status_created_idx ON panel_jobs(status, created_at);
       CREATE INDEX IF NOT EXISTS notifications_user_created_idx ON notifications(user_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS metrics_server_created_idx ON metric_samples(server_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS metrics_created_idx ON metric_samples(created_at);
       CREATE INDEX IF NOT EXISTS sessions_user_idx ON user_sessions(user_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS crash_events_server_created_idx ON crash_events(server_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS account_tokens_hash_idx ON account_tokens(token_hash);
@@ -230,7 +270,7 @@ export class Store {
   }
 
   private async loadPostgres(): Promise<PanelState> {
-    const [users, groups, roles, nodes, servers, allocations, access, schedules, sftpAccounts, jobs, notifications, metrics, sessions, apiKeys, crashEvents, accountTokens, templates, audit] = await Promise.all([
+    const [users, groups, roles, nodes, servers, allocations, access, schedules, sftpAccounts, jobs, notifications, sessions, apiKeys, crashEvents, accountTokens, templates, audit] = await Promise.all([
       this.pool!.query('SELECT * FROM users ORDER BY created_at'),
       this.pool!.query('SELECT * FROM user_groups ORDER BY name'),
       this.pool!.query('SELECT * FROM panel_roles ORDER BY name'),
@@ -242,7 +282,6 @@ export class Store {
       this.pool!.query('SELECT * FROM sftp_accounts ORDER BY created_at'),
       this.pool!.query('SELECT * FROM panel_jobs ORDER BY created_at DESC LIMIT 1000'),
       this.pool!.query('SELECT * FROM notifications ORDER BY created_at DESC LIMIT 2000'),
-      this.pool!.query("SELECT * FROM metric_samples WHERE created_at >= now() - interval '7 days' ORDER BY created_at"),
       this.pool!.query('SELECT * FROM user_sessions ORDER BY created_at DESC'),
       this.pool!.query('SELECT * FROM api_keys ORDER BY created_at DESC'),
       this.pool!.query("SELECT * FROM crash_events WHERE created_at >= now() - interval '7 days' ORDER BY created_at DESC"),
@@ -262,7 +301,7 @@ export class Store {
       sftpAccounts: sftpAccounts.rows.map((row) => ({ id: row.id, serverId: row.server_id, username: row.username, passwordHash: row.password_hash, salt: row.salt, paths: row.paths, readOnly: row.read_only, enabled: row.enabled, createdAt: date(row.created_at), updatedAt: date(row.updated_at) })) as SftpAccount[],
       jobs: jobs.rows.map((row) => ({ id: row.id, kind: row.kind, status: row.status, progress: row.progress, step: row.step, payload: row.payload ?? {}, result: row.result ?? undefined, error: row.error ?? undefined, attempts: row.attempts, maxAttempts: row.max_attempts, userId: row.user_id ?? undefined, serverId: row.server_id ?? undefined, nodeId: row.node_id ?? undefined, createdAt: date(row.created_at), updatedAt: date(row.updated_at), startedAt: row.started_at ? date(row.started_at) : undefined, finishedAt: row.finished_at ? date(row.finished_at) : undefined })) as PanelJob[],
       notifications: notifications.rows.map((row) => ({ id: row.id, userId: row.user_id ?? undefined, level: row.level, title: row.title, message: row.message, link: row.link ?? undefined, readAt: row.read_at ? date(row.read_at) : undefined, createdAt: date(row.created_at) })) as PanelNotification[],
-      metrics: metrics.rows.map((row) => ({ id: row.id, serverId: row.server_id, status: row.status, cpuPercent: Number(row.cpu_percent), memoryBytes: Number(row.memory_bytes), memoryLimitBytes: Number(row.memory_limit_bytes), networkRxBytes: Number(row.network_rx_bytes), networkTxBytes: Number(row.network_tx_bytes), diskBytes: Number(row.disk_bytes), playersOnline: row.players_online ?? undefined, playersMax: row.players_max ?? undefined, createdAt: date(row.created_at) })) as MetricSample[],
+      metrics: [],
       sessions: sessions.rows.map((row) => ({ id: row.id, userId: row.user_id, ip: row.ip ?? undefined, userAgent: row.user_agent ?? undefined, createdAt: date(row.created_at), lastSeenAt: date(row.last_seen_at), expiresAt: date(row.expires_at), revokedAt: row.revoked_at ? date(row.revoked_at) : undefined })) as UserSession[],
       apiKeys: apiKeys.rows.map((row) => ({ id: row.id, userId: row.user_id, name: row.name, prefix: row.prefix, secretHash: row.secret_hash, createdAt: date(row.created_at), lastUsedAt: row.last_used_at ? date(row.last_used_at) : undefined, expiresAt: row.expires_at ? date(row.expires_at) : undefined, revokedAt: row.revoked_at ? date(row.revoked_at) : undefined })) as ApiKeyRecord[],
       crashEvents: crashEvents.rows.map((row) => ({ id: row.id, serverId: row.server_id, reason: row.reason, createdAt: date(row.created_at) })) as CrashEvent[],
@@ -272,87 +311,114 @@ export class Store {
     };
   }
 
-  private async savePostgres() {
+  private async savePostgres(previous?: PanelState) {
     const client = await this.pool!.connect();
     try {
       await client.query('BEGIN');
-      for (const group of this.state.groups) await client.query(
+      for (const group of changedRecords(this.state.groups, previous?.groups)) await client.query(
         `INSERT INTO user_groups (id,name,description,permissions,server_permissions,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO UPDATE SET name=$2,description=$3,permissions=$4,server_permissions=$5,updated_at=$7`,
         [group.id, group.name, group.description, JSON.stringify(group.permissions), JSON.stringify(group.serverPermissions), group.createdAt, group.updatedAt]);
-      for (const role of this.state.roles) await client.query(
+      for (const role of changedRecords(this.state.roles, previous?.roles)) await client.query(
         `INSERT INTO panel_roles (id,name,description,permissions,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO UPDATE SET name=$2,description=$3,permissions=$4,updated_at=$6`,
         [role.id, role.name, role.description, JSON.stringify(role.permissions), role.createdAt, role.updatedAt]);
-      for (const user of this.state.users) await client.query(
+      for (const user of changedRecords(this.state.users, previous?.users)) await client.query(
         `INSERT INTO users (id,username,email,role,role_id,group_ids,permissions,quota,two_factor_secret,two_factor_enabled,recovery_code_hashes,email_verified,password_hash,salt,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT (id) DO UPDATE SET username=$2,email=$3,role=$4,role_id=$5,group_ids=$6,permissions=$7,quota=$8,two_factor_secret=$9,two_factor_enabled=$10,recovery_code_hashes=$11,email_verified=$12,password_hash=$13,salt=$14`,
         [user.id, user.username, user.email, user.role, user.roleId ?? null, JSON.stringify(user.groupIds), JSON.stringify(user.permissions), JSON.stringify(user.quota), encryptSecret(user.twoFactorSecret) ?? null, user.twoFactorEnabled, JSON.stringify(user.recoveryCodeHashes), user.emailVerified, user.passwordHash, user.salt, user.createdAt]);
-      for (const node of this.state.nodes) await client.query(
+      for (const node of changedRecords(this.state.nodes, previous?.nodes)) await client.query(
         `INSERT INTO nodes (id,name,location,url,token,maintenance,maintenance_message,max_memory_mb,max_disk_mb,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO UPDATE SET name=$2,location=$3,url=$4,token=$5,maintenance=$6,maintenance_message=$7,max_memory_mb=$8,max_disk_mb=$9`,
         [node.id, node.name, node.location, node.url, encryptSecret(node.token), node.maintenance, node.maintenanceMessage ?? null, node.maxMemoryMb ?? null, node.maxDiskMb ?? null, node.createdAt]);
-      for (const server of this.state.servers) await client.query(
+      for (const server of changedRecords(this.state.servers, previous?.servers)) await client.query(
         `INSERT INTO servers (id,name,software,version,memory_mb,cpu_percent,disk_mb,port,node_id,allocation_id,owner_id,domain,crash_policy,backup_policy,created_at,platform,ports,steam_config) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) ON CONFLICT (id) DO UPDATE SET name=$2,software=$3,version=$4,memory_mb=$5,cpu_percent=$6,disk_mb=$7,port=$8,node_id=$9,allocation_id=$10,owner_id=$11,domain=$12,crash_policy=$13,backup_policy=$14,platform=$16,ports=$17,steam_config=$18`,
         [server.id, server.name, server.software, server.version, server.memoryMb, server.cpuPercent, server.diskMb, server.port, server.nodeId, server.allocationId, server.ownerId, server.domain ?? null, JSON.stringify(server.crashPolicy), JSON.stringify(server.backupPolicy), server.createdAt, server.platform, JSON.stringify(server.ports), server.steam ? JSON.stringify(server.steam) : null]);
-      for (const allocation of this.state.allocations) await client.query(
+      for (const allocation of changedRecords(this.state.allocations, previous?.allocations)) await client.query(
         `INSERT INTO allocations (id,node_id,ip,port,alias,server_id,reservation_id) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO UPDATE SET node_id=$2,ip=$3,port=$4,alias=$5,server_id=$6,reservation_id=$7`,
         [allocation.id, allocation.nodeId, allocation.ip, allocation.port, allocation.alias ?? null, allocation.serverId ?? null, allocation.reservationId ?? null]);
-      await client.query('DELETE FROM server_access');
-      for (const item of this.state.serverAccess) await client.query('INSERT INTO server_access VALUES ($1,$2,$3)', [item.serverId, item.userId, JSON.stringify(item.permissions)]);
-      for (const schedule of this.state.schedules) await client.query(
+      if (!previous || !sameRecords(this.state.serverAccess, previous.serverAccess)) {
+        await client.query('DELETE FROM server_access');
+        for (const item of this.state.serverAccess) await client.query('INSERT INTO server_access VALUES ($1,$2,$3)', [item.serverId, item.userId, JSON.stringify(item.permissions)]);
+      }
+      for (const schedule of changedRecords(this.state.schedules, previous?.schedules)) await client.query(
         `INSERT INTO schedules VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (id) DO UPDATE SET name=$3,interval_minutes=$4,action=$5,payload=$6,enabled=$7,next_run_at=$8,last_run_at=$9,last_status=$10`,
         [schedule.id, schedule.serverId, schedule.name, schedule.intervalMinutes, schedule.action, schedule.payload ?? null, schedule.enabled, schedule.nextRunAt, schedule.lastRunAt ?? null, schedule.lastStatus ?? null, schedule.createdAt]);
-      for (const account of this.state.sftpAccounts) await client.query(
+      for (const account of changedRecords(this.state.sftpAccounts, previous?.sftpAccounts)) await client.query(
         `INSERT INTO sftp_accounts (id,server_id,username,password_hash,salt,paths,read_only,enabled,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO UPDATE SET username=$3,password_hash=$4,salt=$5,paths=$6,read_only=$7,enabled=$8,updated_at=$10`,
         [account.id, account.serverId, account.username, account.passwordHash, account.salt, JSON.stringify(account.paths), account.readOnly, account.enabled, account.createdAt, account.updatedAt]);
-      for (const job of this.state.jobs) await client.query(
+      for (const job of changedRecords(this.state.jobs, previous?.jobs)) await client.query(
         `INSERT INTO panel_jobs (id,kind,status,progress,step,payload,result,error,attempts,max_attempts,user_id,server_id,node_id,created_at,updated_at,started_at,finished_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) ON CONFLICT (id) DO UPDATE SET status=$3,progress=$4,step=$5,payload=$6,result=$7,error=$8,attempts=$9,max_attempts=$10,updated_at=$15,started_at=$16,finished_at=$17`,
         [job.id, job.kind, job.status, job.progress, job.step, JSON.stringify(job.payload), job.result ? JSON.stringify(job.result) : null, job.error ?? null, job.attempts, job.maxAttempts, job.userId ?? null, job.serverId ?? null, job.nodeId ?? null, job.createdAt, job.updatedAt, job.startedAt ?? null, job.finishedAt ?? null]);
-      for (const notification of this.state.notifications) await client.query(
+      for (const notification of changedRecords(this.state.notifications, previous?.notifications)) await client.query(
         `INSERT INTO notifications (id,user_id,level,title,message,link,read_at,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO UPDATE SET read_at=$7`,
         [notification.id, notification.userId ?? null, notification.level, notification.title, notification.message, notification.link ?? null, notification.readAt ?? null, notification.createdAt]);
-      for (const metric of this.state.metrics) await client.query(
+      for (const metric of changedRecords(this.state.metrics, previous?.metrics)) await client.query(
         `INSERT INTO metric_samples (id,server_id,status,cpu_percent,memory_bytes,memory_limit_bytes,network_rx_bytes,network_tx_bytes,disk_bytes,players_online,players_max,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (id) DO NOTHING`,
         [metric.id, metric.serverId, metric.status, metric.cpuPercent, metric.memoryBytes, metric.memoryLimitBytes, metric.networkRxBytes, metric.networkTxBytes, metric.diskBytes, metric.playersOnline ?? null, metric.playersMax ?? null, metric.createdAt]);
-      for (const session of this.state.sessions) await client.query(
+      for (const session of changedRecords(this.state.sessions, previous?.sessions)) await client.query(
         `INSERT INTO user_sessions (id,user_id,ip,user_agent,created_at,last_seen_at,expires_at,revoked_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO UPDATE SET last_seen_at=$6,revoked_at=$8`,
         [session.id, session.userId, session.ip ?? null, session.userAgent ?? null, session.createdAt, session.lastSeenAt, session.expiresAt, session.revokedAt ?? null]);
-      for (const key of this.state.apiKeys) await client.query(
+      for (const key of changedRecords(this.state.apiKeys, previous?.apiKeys)) await client.query(
         `INSERT INTO api_keys (id,user_id,name,prefix,secret_hash,created_at,last_used_at,expires_at,revoked_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (id) DO UPDATE SET name=$3,last_used_at=$7,expires_at=$8,revoked_at=$9`,
         [key.id, key.userId, key.name, key.prefix, key.secretHash, key.createdAt, key.lastUsedAt ?? null, key.expiresAt ?? null, key.revokedAt ?? null]);
-      for (const event of this.state.crashEvents) await client.query(
+      for (const event of changedRecords(this.state.crashEvents, previous?.crashEvents)) await client.query(
         `INSERT INTO crash_events (id,server_id,reason,created_at) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING`,
         [event.id, event.serverId, event.reason, event.createdAt]);
-      for (const token of this.state.accountTokens) await client.query(
+      for (const token of changedRecords(this.state.accountTokens, previous?.accountTokens)) await client.query(
         `INSERT INTO account_tokens (id,user_id,type,token_hash,expires_at,used_at,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO UPDATE SET used_at=$6`,
         [token.id, token.userId, token.type, token.tokenHash, token.expiresAt, token.usedAt ?? null, token.createdAt]);
-      for (const template of this.state.templates) await client.query(
+      for (const template of changedRecords(this.state.templates, previous?.templates)) await client.query(
         `INSERT INTO server_templates (id,name,description,software,version,memory_mb,cpu_percent,disk_mb,created_by,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (id) DO UPDATE SET name=$2,description=$3,software=$4,version=$5,memory_mb=$6,cpu_percent=$7,disk_mb=$8,updated_at=$11`,
         [template.id, template.name, template.description, template.software, template.version, template.memoryMb, template.cpuPercent, template.diskMb, template.createdBy, template.createdAt, template.updatedAt]);
-      for (const entry of this.state.auditLogs) await client.query(
+      for (const entry of changedRecords(this.state.auditLogs, previous?.auditLogs)) await client.query(
         `INSERT INTO audit_logs VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO NOTHING`,
         [entry.id, entry.userId ?? null, entry.action, entry.targetType, entry.targetId ?? null, JSON.stringify(entry.metadata), entry.createdAt]);
-      await client.query('DELETE FROM allocations WHERE id <> ALL($1::text[])', [this.state.allocations.map((item) => item.id)]);
-      await client.query('DELETE FROM schedules WHERE id <> ALL($1::text[])', [this.state.schedules.map((item) => item.id)]);
-      await client.query('DELETE FROM sftp_accounts WHERE id <> ALL($1::text[])', [this.state.sftpAccounts.map((item) => item.id)]);
-      await client.query('DELETE FROM panel_jobs WHERE id <> ALL($1::text[])', [this.state.jobs.map((item) => item.id)]);
-      await client.query('DELETE FROM notifications WHERE id <> ALL($1::text[])', [this.state.notifications.map((item) => item.id)]);
-      await client.query('DELETE FROM metric_samples WHERE id <> ALL($1::text[])', [this.state.metrics.map((item) => item.id)]);
-      await client.query('DELETE FROM user_sessions WHERE id <> ALL($1::text[])', [this.state.sessions.map((item) => item.id)]);
-      await client.query('DELETE FROM api_keys WHERE id <> ALL($1::text[])', [this.state.apiKeys.map((item) => item.id)]);
-      await client.query('DELETE FROM crash_events WHERE id <> ALL($1::text[])', [this.state.crashEvents.map((item) => item.id)]);
-      await client.query('DELETE FROM account_tokens WHERE id <> ALL($1::text[])', [this.state.accountTokens.map((item) => item.id)]);
-      await client.query('DELETE FROM server_templates WHERE id <> ALL($1::text[])', [this.state.templates.map((item) => item.id)]);
-      await client.query('DELETE FROM servers WHERE id <> ALL($1::text[])', [this.state.servers.map((item) => item.id)]);
-      await client.query('DELETE FROM nodes WHERE id <> ALL($1::text[])', [this.state.nodes.map((item) => item.id)]);
-      await client.query('DELETE FROM users WHERE id <> ALL($1::text[])', [this.state.users.map((item) => item.id)]);
-      await client.query('DELETE FROM user_groups WHERE id <> ALL($1::text[])', [this.state.groups.map((item) => item.id)]);
-      await client.query('DELETE FROM panel_roles WHERE id <> ALL($1::text[])', [this.state.roles.map((item) => item.id)]);
+      await deleteRemoved(client, 'allocations', this.state.allocations, previous?.allocations);
+      await deleteRemoved(client, 'schedules', this.state.schedules, previous?.schedules);
+      await deleteRemoved(client, 'sftp_accounts', this.state.sftpAccounts, previous?.sftpAccounts);
+      await deleteRemoved(client, 'panel_jobs', this.state.jobs, previous?.jobs);
+      await deleteRemoved(client, 'notifications', this.state.notifications, previous?.notifications);
+      await deleteRemoved(client, 'metric_samples', this.state.metrics, previous?.metrics);
+      await deleteRemoved(client, 'user_sessions', this.state.sessions, previous?.sessions);
+      await deleteRemoved(client, 'api_keys', this.state.apiKeys, previous?.apiKeys);
+      await deleteRemoved(client, 'crash_events', this.state.crashEvents, previous?.crashEvents);
+      await deleteRemoved(client, 'account_tokens', this.state.accountTokens, previous?.accountTokens);
+      await deleteRemoved(client, 'server_templates', this.state.templates, previous?.templates);
+      await deleteRemoved(client, 'servers', this.state.servers, previous?.servers);
+      await deleteRemoved(client, 'nodes', this.state.nodes, previous?.nodes);
+      await deleteRemoved(client, 'users', this.state.users, previous?.users);
+      await deleteRemoved(client, 'user_groups', this.state.groups, previous?.groups);
+      await deleteRemoved(client, 'panel_roles', this.state.roles, previous?.roles);
       await client.query('COMMIT');
     } catch (error) { await client.query('ROLLBACK'); throw error; }
     finally { client.release(); }
   }
 }
 
+function changedRecords<T extends { id: string }>(current: T[], previous?: T[]) {
+  if (!previous) return current;
+  const before = new Map(previous.map((item) => [item.id, JSON.stringify(item)]));
+  return current.filter((item) => before.get(item.id) !== JSON.stringify(item));
+}
+
+function sameRecords<T>(current: T[], previous: T[]) {
+  return JSON.stringify(current) === JSON.stringify(previous);
+}
+
+async function deleteRemoved<T extends { id: string }>(client: pg.PoolClient, table: string, current: T[], previous?: T[]) {
+  if (!previous) return;
+  const currentIds = new Set(current.map((item) => item.id));
+  const removedIds = previous.filter((item) => !currentIds.has(item.id)).map((item) => item.id);
+  if (removedIds.length) await client.query(`DELETE FROM ${table} WHERE id = ANY($1::text[])`, [removedIds]);
+}
+
 function emptyState(): PanelState { return { users: [], groups: [], roles: [], nodes: [], servers: [], allocations: [], serverAccess: [], schedules: [], sftpAccounts: [], jobs: [], notifications: [], metrics: [], sessions: [], apiKeys: [], crashEvents: [], accountTokens: [], templates: [], auditLogs: [] }; }
 function date(value: unknown) { return value instanceof Date ? value.toISOString() : String(value); }
+function metricFromRow(row: Record<string, unknown>): MetricSample {
+  return { id: String(row.id), serverId: String(row.server_id), status: String(row.status) as MetricSample['status'], cpuPercent: Number(row.cpu_percent), memoryBytes: Number(row.memory_bytes), memoryLimitBytes: Number(row.memory_limit_bytes), networkRxBytes: Number(row.network_rx_bytes), networkTxBytes: Number(row.network_tx_bytes), diskBytes: Number(row.disk_bytes), playersOnline: row.players_online == null ? undefined : Number(row.players_online), playersMax: row.players_max == null ? undefined : Number(row.players_max), createdAt: date(row.created_at) };
+}
+function downsampleMetrics(samples: MetricSample[], maximum = 72) {
+  if (samples.length <= maximum) return samples;
+  const lastIndex = samples.length - 1;
+  return Array.from({ length: maximum }, (_, index) => samples[Math.round(index * lastIndex / (maximum - 1))]!);
+}
 function hasData(raw: Partial<PanelState>) { return Boolean(raw.user || raw.users?.length || raw.nodes?.length || raw.servers?.length); }
 
 function unlimitedQuota() { return { maxServers: -1, maxMemoryMb: -1, maxDiskMb: -1, maxBackups: -1 }; }

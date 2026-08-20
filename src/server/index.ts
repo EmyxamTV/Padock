@@ -16,7 +16,7 @@ import { allowedKinds, curseForgeConfigured, resolveCurseForgeFiles, resolveCurs
 import { padockEnv } from './config.js';
 import { mailConfigured, sendAccountMail } from './mail.js';
 import { steamAllocationOffsets, steamGameById, steamGames } from './steam-games.js';
-import type { Allocation, AuditEntry, JobKind, MinecraftServer, PanelJob, PanelNotification, PanelPermission, PanelRole, ServerPermission, ServerPort, ServerSchedule, SftpAccount, UserGroup, UserRecord } from './types.js';
+import type { Allocation, AuditEntry, JobKind, MetricSample, MinecraftServer, PanelJob, PanelNotification, PanelPermission, PanelRole, ServerPermission, ServerPort, ServerSchedule, SftpAccount, UserGroup, UserRecord } from './types.js';
 
 const host = padockEnv('HOST') ?? '0.0.0.0';
 const port = Number(padockEnv('PORT') ?? 3000);
@@ -598,13 +598,18 @@ app.delete('/api/nodes/:id/allocations/:allocationId', { preHandler: [auth, requ
   return { ok: true };
 });
 
-app.get('/api/servers', { preHandler: auth }, async (request) => Promise.all(visibleServers(currentUser(request)!).map(async (server) => {
+app.get('/api/servers', { preHandler: auth }, async (request) => {
   const user = currentUser(request)!;
-  const runtime = await runtimeStateFor(server);
-  const job = latestServerJob(server.id);
-  const status = job && ['queued', 'running'].includes(job.status) && job.kind === 'server.create' ? 'installing' : job?.kind === 'server.create' && job.status === 'failed' && runtime.status === 'missing' ? 'failed' : runtime.status;
-  return { ...server, permissions: effectiveServerPermissions(user, server), address: serverAddress(server), status, runtime, activeJob: job && ['queued', 'running'].includes(job.status) ? publicJob(job) : undefined };
-})));
+  const servers = visibleServers(user);
+  const runtimes = await runtimeStatesFor(servers);
+  const latestJobs = latestJobsFor(servers);
+  return servers.map((server) => {
+    const runtime = runtimes.get(server.id) ?? { status: 'unavailable' as const };
+    const job = latestJobs.get(server.id);
+    const status = job && ['queued', 'running'].includes(job.status) && job.kind === 'server.create' ? 'installing' : job?.kind === 'server.create' && job.status === 'failed' && runtime.status === 'missing' ? 'failed' : runtime.status;
+    return { ...server, permissions: effectiveServerPermissions(user, server), address: serverAddress(server), status, runtime, activeJob: job && ['queued', 'running'].includes(job.status) ? publicJob(job) : undefined };
+  });
+});
 
 app.get('/api/gateway', { preHandler: auth }, async () => gateway.status(store.snapshot));
 
@@ -781,7 +786,7 @@ app.get('/api/servers/:id/metrics', { preHandler: auth }, async (request, reply)
   const parsed = z.object({ hours: z.coerce.number().int().min(1).max(168).default(24) }).safeParse(request.query);
   if (!parsed.success) return reply.code(400).send({ error: 'Période invalide.' });
   const since = Date.now() - parsed.data.hours * 3600_000;
-  return store.snapshot.metrics.filter((item) => item.serverId === server.id && new Date(item.createdAt).getTime() >= since);
+  return store.metricsForServer(server.id, since);
 });
 
 app.put('/api/servers/:id/resources', { preHandler: auth }, async (request, reply) => {
@@ -1427,6 +1432,25 @@ function authorizedServer(request: FastifyRequest, reply: FastifyReply, id: stri
 function clientFor(server: MinecraftServer) { const node = store.snapshot.nodes.find((item) => item.id === server.nodeId); if (!node) throw new Error('Le nœud associé à ce serveur n’existe plus.'); return new NodeClient(node); }
 function serverAddress(server: MinecraftServer) { if (server.domain) return server.domain; const allocation = store.snapshot.allocations.find((item) => item.id === server.allocationId); const hostname = allocation?.alias || (allocation?.ip && allocation.ip !== '0.0.0.0' ? allocation.ip : new URL(publicUrl).hostname); return `${hostname}:${server.port}`; }
 async function runtimeStateFor(server: MinecraftServer) { try { return await clientFor(server).state(server); } catch (error) { return { status: 'unavailable' as const, error: (error as Error).message }; } }
+async function runtimeStatesFor(servers: MinecraftServer[]) {
+  const byNode = new Map<string, MinecraftServer[]>();
+  for (const server of servers) byNode.set(server.nodeId, [...(byNode.get(server.nodeId) ?? []), server]);
+  const runtimes = new Map<string, Awaited<ReturnType<typeof runtimeStateFor>>>();
+  await Promise.all([...byNode.entries()].map(async ([nodeId, nodeServers]) => {
+    const node = store.snapshot.nodes.find((item) => item.id === nodeId);
+    if (!node) {
+      for (const server of nodeServers) runtimes.set(server.id, { status: 'unavailable', error: 'Le nœud associé n’existe plus.' });
+      return;
+    }
+    try {
+      const states = await new NodeClient(node).states(nodeServers);
+      for (const server of nodeServers) runtimes.set(server.id, states[server.id] ?? { status: 'missing' });
+    } catch (error) {
+      for (const server of nodeServers) runtimes.set(server.id, { status: 'unavailable', error: (error as Error).message });
+    }
+  }));
+  return runtimes;
+}
 async function statusFor(server: MinecraftServer) { return (await runtimeStateFor(server)).status; }
 async function runtimeVersion(server: MinecraftServer) {
   try { const detected = (await clientFor(server).runtime(server)).minecraftVersion; if (detected) return detected; } catch { /* Le serveur n'a pas encore produit ses fichiers. */ }
@@ -1545,6 +1569,16 @@ function makeJob(kind: JobKind, userId?: string, serverId?: string, nodeId?: str
 async function enqueueJob(job: PanelJob) { await store.update((draft) => { draft.jobs.unshift(job); draft.jobs = draft.jobs.slice(0, 1000); }); return job; }
 function publicJob(job: PanelJob) { return { id: job.id, kind: job.kind, status: job.status, progress: job.progress, step: job.step, result: job.result, error: job.error, attempts: job.attempts, maxAttempts: job.maxAttempts, userId: job.userId, serverId: job.serverId, nodeId: job.nodeId, createdAt: job.createdAt, updatedAt: job.updatedAt, startedAt: job.startedAt, finishedAt: job.finishedAt }; }
 function latestServerJob(serverId: string) { return store.snapshot.jobs.filter((item) => item.serverId === serverId).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]; }
+function latestJobsFor(servers: MinecraftServer[]) {
+  const wanted = new Set(servers.map((server) => server.id));
+  const latest = new Map<string, PanelJob>();
+  for (const job of store.snapshot.jobs) {
+    if (!job.serverId || !wanted.has(job.serverId)) continue;
+    const current = latest.get(job.serverId);
+    if (!current || job.createdAt > current.createdAt) latest.set(job.serverId, job);
+  }
+  return latest;
+}
 function canViewJob(user: UserRecord, job: PanelJob) { return user.role === 'admin' || job.userId === user.id || Boolean(job.serverId && visibleServers(user).some((server) => server.id === job.serverId)); }
 
 async function runQueuedJobs() {
@@ -1689,12 +1723,20 @@ async function collectMetrics() {
   if (!await store.tryBecomeLeader()) return;
   if (collectingMetrics) return; collectingMetrics = true;
   try {
-    const samples = (await Promise.all(store.snapshot.servers.map(async (server) => {
-      try { const metric = await clientFor(server).metrics(server); return { id: randomUUID().slice(0, 8), serverId: server.id, ...metric, createdAt: new Date().toISOString() }; }
-      catch { return { id: randomUUID().slice(0, 8), serverId: server.id, status: 'unavailable' as const, cpuPercent: 0, memoryBytes: 0, memoryLimitBytes: 0, networkRxBytes: 0, networkTxBytes: 0, diskBytes: 0, createdAt: new Date().toISOString() }; }
-    }))).filter(Boolean);
+    const servers = store.snapshot.servers;
+    const byNode = new Map<string, MinecraftServer[]>();
+    for (const server of servers) byNode.set(server.nodeId, [...(byNode.get(server.nodeId) ?? []), server]);
+    const samples: MetricSample[] = [];
+    await Promise.all([...byNode.entries()].map(async ([nodeId, nodeServers]) => {
+      const node = store.snapshot.nodes.find((item) => item.id === nodeId);
+      if (!node) { for (const server of nodeServers) samples.push(unavailableMetric(server.id)); return; }
+      try {
+        const metrics = await new NodeClient(node).metricsMany(nodeServers);
+        for (const server of nodeServers) samples.push({ id: randomUUID().slice(0, 8), serverId: server.id, ...(metrics[server.id] ?? unavailableMetricValues()), createdAt: new Date().toISOString() });
+      } catch { for (const server of nodeServers) samples.push(unavailableMetric(server.id)); }
+    }));
     const cutoff = Date.now() - 7 * 86400_000;
-    await store.update((draft) => { draft.metrics.push(...samples); draft.metrics = draft.metrics.filter((item) => new Date(item.createdAt).getTime() >= cutoff).slice(-100_000); });
+    await store.recordMetrics(samples, cutoff);
     for (const sample of samples) {
       const server = findServer(sample.serverId); if (!server) continue;
       if (server.diskMb > 0 && sample.diskBytes / (server.diskMb * 1024 * 1024) >= 0.9 && !recentNotification(`disk:${server.id}`, 6 * 3600_000)) await createNotification({ userId: server.ownerId, level: 'warning', title: `${server.name} manque d’espace`, message: `Le stockage utilise ${Math.round(sample.diskBytes / (server.diskMb * 1024 * 1024) * 100)} % du quota.`, link: `server:${server.id}` });
@@ -1710,9 +1752,11 @@ async function monitorCrashes() {
   if (!await store.tryBecomeLeader()) return;
   if (monitoringCrashes) return; monitoringCrashes = true;
   try {
-    for (const server of store.snapshot.servers.filter((item) => item.crashPolicy.enabled)) {
+    const servers = store.snapshot.servers.filter((item) => item.crashPolicy.enabled);
+    const states = await runtimeStatesFor(servers);
+    for (const server of servers) {
       if (crashRestarting.has(server.id) || latestServerJob(server.id)?.status === 'running') continue;
-      let state; try { state = await clientFor(server).state(server); } catch { continue; }
+      const state = states.get(server.id); if (!state || state.status === 'unavailable' || state.status === 'missing') continue;
       const previousRestarts = lastRestartCounts.get(server.id) ?? state.restartCount ?? 0; const restartCount = state.restartCount ?? 0; lastRestartCounts.set(server.id, restartCount);
       const crashed = restartCount > previousRestarts || (state.status === 'stopped' && Boolean(state.oomKilled || state.exitCode)); if (!crashed) continue;
       const reason = state.oomKilled ? 'Mémoire épuisée (OOM)' : state.error || `Code de sortie ${state.exitCode ?? 'inconnu'}`; const now = new Date();
@@ -1727,6 +1771,9 @@ async function monitorCrashes() {
     }
   } finally { monitoringCrashes = false; }
 }
+
+function unavailableMetricValues() { return { status: 'unavailable' as const, cpuPercent: 0, memoryBytes: 0, memoryLimitBytes: 0, networkRxBytes: 0, networkTxBytes: 0, diskBytes: 0 }; }
+function unavailableMetric(serverId: string): MetricSample { return { id: randomUUID().slice(0, 8), serverId, ...unavailableMetricValues(), createdAt: new Date().toISOString() }; }
 
 function recentNotification(marker: string, period: number) { const [kind = marker, ...rest] = marker.split(':'); const target = rest.join(':'); const word = ({ disk: 'espace', 'crash-loop': 'boucle', node: 'nœud' } as Record<string, string>)[kind] ?? kind; return store.snapshot.notifications.some((item) => item.title.toLowerCase().includes(word) && (!target || item.link?.endsWith(target)) && new Date(item.createdAt).getTime() >= Date.now() - period); }
 async function cleanupOperationalData() {

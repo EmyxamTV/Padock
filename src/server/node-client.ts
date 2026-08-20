@@ -23,6 +23,12 @@ export interface ServerStats {
   diskBytes: number;
 }
 
+export interface RemoteServerMetrics extends ServerStats {
+  status: RemoteServerState['status'];
+  playersOnline?: number;
+  playersMax?: number;
+}
+
 export interface RemoteServerState {
   status: 'running' | 'stopped' | 'missing' | 'starting';
   health?: string;
@@ -71,12 +77,28 @@ export class NodeClient {
   }
 
   state(server: MinecraftServer) { return this.request<RemoteServerState>(`/v1/servers/${server.id}/status`); }
+  async states(servers: MinecraftServer[]) {
+    if (!servers.length) return Promise.resolve({} as Record<string, RemoteServerState>);
+    try { return await this.request<Record<string, RemoteServerState>>('/v1/servers/statuses', { method: 'POST', body: JSON.stringify({ ids: servers.map((server) => server.id) }) }); }
+    catch (error) {
+      if ((error as { statusCode?: number }).statusCode !== 404) throw error;
+      return Object.fromEntries(await Promise.all(servers.map(async (server) => [server.id, await this.state(server)] as const)));
+    }
+  }
   updateResources(server: MinecraftServer, input: { memoryMb: number; cpuPercent: number; diskMb: number }) { return this.request<{ ok: true }>(`/v1/servers/${server.id}/resources`, { method: 'PUT', body: JSON.stringify(input) }, 60_000); }
   updateCrashPolicy(server: MinecraftServer, input: { enabled: boolean; maxRestarts: number }) { return this.request<{ ok: true }>(`/v1/servers/${server.id}/crash-policy`, { method: 'PUT', body: JSON.stringify(input) }); }
   updatePorts(server: MinecraftServer, ports: Array<{ internalPort: number; protocol: 'tcp' | 'udp'; hostPort?: number }>) { return this.request<{ ports: Array<{ internalPort: number; protocol: 'tcp' | 'udp'; hostPort: number }> }>(`/v1/servers/${server.id}/ports`, { method: 'PUT', body: JSON.stringify({ ports }) }, 60_000); }
 
   stats(server: MinecraftServer) { return this.request<ServerStats>(`/v1/servers/${server.id}/stats`); }
-  metrics(server: MinecraftServer) { return this.request<ServerStats & { status: RemoteServerState['status']; playersOnline?: number; playersMax?: number }>(`/v1/servers/${server.id}/metrics`, {}, 30_000); }
+  metrics(server: MinecraftServer) { return this.request<RemoteServerMetrics>(`/v1/servers/${server.id}/metrics`, {}, 30_000); }
+  async metricsMany(servers: MinecraftServer[]) {
+    if (!servers.length) return {} as Record<string, RemoteServerMetrics>;
+    try { return await this.request<Record<string, RemoteServerMetrics>>('/v1/servers/metrics', { method: 'POST', body: JSON.stringify({ ids: servers.map((server) => server.id) }) }, 60_000); }
+    catch (error) {
+      if ((error as { statusCode?: number }).statusCode !== 404) throw error;
+      return Object.fromEntries(await Promise.all(servers.map(async (server) => [server.id, await this.metrics(server)] as const)));
+    }
+  }
   files(server: MinecraftServer, relative = '') { return this.request<Array<{ name: string; path: string; type: 'file' | 'directory'; size: number; modifiedAt: string }>>(`/v1/servers/${server.id}/files?path=${encodeURIComponent(relative)}`); }
   readFile(server: MinecraftServer, relative: string) { return this.request<{ content: string }>(`/v1/servers/${server.id}/files/content?path=${encodeURIComponent(relative)}`); }
   writeFile(server: MinecraftServer, relative: string, content: string) { return this.request<{ ok: true }>(`/v1/servers/${server.id}/files/content`, { method: 'PUT', body: JSON.stringify({ path: relative, content }) }); }
@@ -104,7 +126,7 @@ export class NodeClient {
     const headers = new Headers(destination.headers()); headers.set('Content-Type', 'application/x-padock-backup'); headers.set('X-Padock-Checksum', checksum);
     const length = sourceResponse.headers.get('content-length'); if (length) headers.set('Content-Length', length);
     const response = await fetch(destination.url(`/v1/servers/${destinationServer.id}/backups/${encodeURIComponent(backupId)}/import`), { method: 'PUT', headers, body: sourceResponse.body, duplex: 'half', signal: AbortSignal.timeout(60 * 60_000) } as RequestInit & { duplex: 'half' });
-    if (!response.ok) throw new Error(await errorFrom(response));
+    if (!response.ok) throw Object.assign(new Error(await errorFrom(response)), { statusCode: response.status });
     return await response.json() as { id: string; name: string; size: number; checksum: string; createdAt: string };
   }
   syncSftpAccount(account: SftpAccount) { return this.request<{ ok: true }>(`/v1/sftp/accounts/${account.id}`, { method: 'PUT', body: JSON.stringify({ serverId: account.serverId, username: account.username, passwordHash: account.passwordHash, salt: account.salt, paths: account.paths, readOnly: account.readOnly, enabled: account.enabled }) }); }
@@ -143,7 +165,7 @@ export class NodeClient {
       headers,
       signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!response.ok) throw new Error(await errorFrom(response));
+    if (!response.ok) throw Object.assign(new Error(await errorFrom(response)), { statusCode: response.status });
     return await response.json() as T;
   }
 

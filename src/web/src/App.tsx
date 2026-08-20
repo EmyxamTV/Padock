@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { io as connectSocket } from 'socket.io-client';
 import { api, type AuditEntry, type GatewayStatus, type NetworkAllocation, type NodeRecord, type PanelJob, type PanelNotification, type PanelPermission, type PanelRole, type Server, type UserDirectoryEntry, type UserGroup, type UserRecord } from './api';
 import { Auth } from './components/Auth';
@@ -31,21 +31,59 @@ export function App() {
   const [creatingServer, setCreatingServer] = useState(false);
   const [createError, setCreateError] = useState('');
   const [error, setError] = useState('');
+  const meRef = useRef<UserRecord | undefined>(undefined);
+  const coreRequestRef = useRef<Promise<void> | undefined>(undefined);
+  const operationsRequestRef = useRef<Promise<void> | undefined>(undefined);
+
+  useEffect(() => { meRef.current = me; }, [me]);
+
+  const loadCoreData = useCallback(async () => {
+    if (coreRequestRef.current) return coreRequestRef.current;
+    const request = (async () => {
+      try {
+        const [serverList, nodeList, gatewayStatus, directoryList] = await Promise.all([api<Server[]>('/api/servers'), api<NodeRecord[]>('/api/nodes'), api<GatewayStatus>('/api/gateway'), api<UserDirectoryEntry[]>('/api/users/directory')]);
+        setServers((current) => sameData(current, serverList) ? current : serverList);
+        setNodes((current) => sameData(current, nodeList) ? current : nodeList);
+        setGateway((current) => sameData(current, gatewayStatus) ? current : gatewayStatus);
+        setDirectory((current) => sameData(current, directoryList) ? current : directoryList);
+        setError('');
+      } catch (err) { setError((err as Error).message); }
+    })();
+    coreRequestRef.current = request;
+    try { await request; } finally { if (coreRequestRef.current === request) coreRequestRef.current = undefined; }
+  }, []);
+
+  const loadOperationsData = useCallback(async () => {
+    if (operationsRequestRef.current) return operationsRequestRef.current;
+    const request = (async () => {
+      try {
+        const [jobList, notificationList] = await Promise.all([api<PanelJob[]>('/api/jobs'), api<PanelNotification[]>('/api/notifications')]);
+        setJobs((current) => sameData(current, jobList) ? current : jobList);
+        setNotifications((current) => sameData(current, notificationList) ? current : notificationList);
+      } catch (err) { setError((err as Error).message); }
+    })();
+    operationsRequestRef.current = request;
+    try { await request; } finally { if (operationsRequestRef.current === request) operationsRequestRef.current = undefined; }
+  }, []);
+
+  const loadUsersData = useCallback(async () => {
+    try {
+      const [userList, roleList, groupList] = await Promise.all([api<UserRecord[]>('/api/users'), api<PanelRole[]>('/api/roles'), api<UserGroup[]>('/api/groups')]);
+      setUsers(userList); setRoles(roleList); setGroups(groupList);
+    } catch (err) { setError((err as Error).message); }
+  }, []);
+
+  const loadAuditData = useCallback(async () => {
+    try { setAudits(await api<AuditEntry[]>('/api/audit')); }
+    catch (err) { setError((err as Error).message); }
+  }, []);
 
   const loadData = useCallback(async () => {
-    try {
-      const freshMe = await api<UserRecord>('/api/auth/me');
-      if (!me || JSON.stringify(freshMe) !== JSON.stringify(me)) setMe(freshMe);
-      const [serverList, nodeList, gatewayStatus, directoryList, jobList, notificationList] = await Promise.all([api<Server[]>('/api/servers'), api<NodeRecord[]>('/api/nodes'), api<GatewayStatus>('/api/gateway'), api<UserDirectoryEntry[]>('/api/users/directory'), api<PanelJob[]>('/api/jobs'), api<PanelNotification[]>('/api/notifications')]);
-      setServers(serverList); setNodes(nodeList); setGateway(gatewayStatus); setDirectory(directoryList);
-      setJobs(jobList); setNotifications(notificationList);
-      if (canPanel(freshMe, 'users.manage')) {
-        const [userList, roleList, groupList] = await Promise.all([api<UserRecord[]>('/api/users'), api<PanelRole[]>('/api/roles'), api<UserGroup[]>('/api/groups')]);
-        setUsers(userList); setRoles(roleList); setGroups(groupList);
-      } else { setUsers([]); setRoles([]); setGroups([]); }
-      if (canPanel(freshMe, 'audit.view')) setAudits(await api<AuditEntry[]>('/api/audit')); else setAudits([]);
-    } catch (err) { setError((err as Error).message); }
-  }, [me]);
+    await Promise.all([loadCoreData(), loadOperationsData()]);
+    const user = meRef.current;
+    if (section === 'users' && canPanel(user, 'users.manage')) await loadUsersData();
+    if (section === 'audit' && canPanel(user, 'audit.view')) await loadAuditData();
+  }, [section, loadCoreData, loadOperationsData, loadUsersData, loadAuditData]);
 
   useEffect(() => {
     Promise.all([api<{ initialized: boolean }>('/api/auth/status'), api<UserRecord>('/api/auth/me').catch(() => null)])
@@ -54,10 +92,32 @@ export function App() {
 
   useEffect(() => {
     if (auth !== 'ready' || !me) return;
-    loadData(); const timer = window.setInterval(loadData, 30000);
-    const socket = connectSocket(); socket.on('job:update', loadData); socket.on('notification:new', loadData); socket.on('connect', loadData);
-    return () => { window.clearInterval(timer); socket.disconnect(); };
-  }, [auth, me, loadData]);
+    void loadCoreData(); void loadOperationsData();
+    let terminalRefresh: number | undefined;
+    const socket = connectSocket();
+    socket.on('connect', () => { void loadCoreData(); void loadOperationsData(); });
+    socket.on('job:update', (job: PanelJob) => {
+      setJobs((current) => upsertJob(current, job));
+      setServers((current) => current.map((server) => {
+        if (server.id !== job.serverId) return server;
+        if (job.status === 'queued' || job.status === 'running') return { ...server, status: job.kind === 'server.create' ? 'installing' : server.status, activeJob: job };
+        return server.activeJob?.id === job.id ? { ...server, activeJob: undefined } : server;
+      }));
+      if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
+        if (terminalRefresh) window.clearTimeout(terminalRefresh);
+        terminalRefresh = window.setTimeout(() => void loadCoreData(), 250);
+      }
+    });
+    socket.on('notification:new', (notification: PanelNotification) => setNotifications((current) => [notification, ...current.filter((item) => item.id !== notification.id)].slice(0, 100)));
+    const timer = window.setInterval(() => { void loadCoreData(); void loadOperationsData(); }, 30000);
+    return () => { window.clearInterval(timer); if (terminalRefresh) window.clearTimeout(terminalRefresh); socket.disconnect(); };
+  }, [auth, me?.id, loadCoreData, loadOperationsData]);
+
+  useEffect(() => {
+    if (auth !== 'ready') return;
+    if (section === 'users' && canPanel(me, 'users.manage')) void loadUsersData();
+    if (section === 'audit' && canPanel(me, 'audit.view')) void loadAuditData();
+  }, [auth, section, me, loadUsersData, loadAuditData]);
 
   async function authenticated() { const user = await api<UserRecord>('/api/auth/me'); setMe(user); setAuth('ready'); }
   async function logout() { await api('/api/auth/logout', { method: 'POST' }); setServers([]); setUsers([]); setRoles([]); setMe(undefined); setAuth('login'); }
@@ -130,6 +190,10 @@ export function App() {
   </div>;
 }
 
+function sameData(left: unknown, right: unknown) { return JSON.stringify(left) === JSON.stringify(right); }
+function upsertJob(current: PanelJob[], job: PanelJob) {
+  return [job, ...current.filter((item) => item.id !== job.id)].sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, 250);
+}
 function canPanel(user: UserRecord | undefined, permission: PanelPermission) { return Boolean(user && (user.role === 'admin' || user.permissions.includes(permission))); }
 
 function Nav({ active, icon, label, onClick }: { active: boolean; icon: string; label: string; onClick: () => void }) { return <button className={active ? 'nav-item active' : 'nav-item'} onClick={onClick}><span className="icon">{icon}</span>{label}</button>; }

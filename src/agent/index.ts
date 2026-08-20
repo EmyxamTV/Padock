@@ -133,6 +133,12 @@ app.post('/v1/servers', async (request, reply) => {
   return reply.code(201).send({ dockerId: await docker.create(parsed.data, installedPack && parsed.data.serverPack ? { relativePath: installedPack.path, projectId: parsed.data.serverPack.projectId, fileId: parsed.data.serverPack.fileId, filename: parsed.data.serverPack.filename } : undefined) });
 });
 
+app.post('/v1/servers/statuses', async (request, reply) => {
+  const parsed = z.object({ ids: z.array(idSchema).min(1).max(500) }).safeParse(request.body);
+  if (!parsed.success) return reply.code(400).send({ error: 'Liste de serveurs invalide.' });
+  return docker.states([...new Set(parsed.data.ids)]);
+});
+
 app.get('/v1/servers/:id/status', async (request, reply) => {
   const id = parseId(request.params, reply); if (!id) return;
   return docker.state(id);
@@ -164,16 +170,15 @@ app.get('/v1/servers/:id/stats', async (request, reply) => {
   return { ...await docker.stats(id), diskBytes };
 });
 
+app.post('/v1/servers/metrics', async (request, reply) => {
+  const parsed = z.object({ ids: z.array(idSchema).min(1).max(500) }).safeParse(request.body);
+  if (!parsed.success) return reply.code(400).send({ error: 'Liste de serveurs invalide.' });
+  return docker.metricsMany([...new Set(parsed.data.ids)]);
+});
+
 app.get('/v1/servers/:id/metrics', async (request, reply) => {
   const id = parseId(request.params, reply); if (!id) return;
-  const state = await docker.state(id); const diskBytes = await docker.diskUsage(id);
-  if (state.status !== 'running') return { status: state.status, cpuPercent: 0, memoryBytes: 0, memoryLimitBytes: 0, networkRxBytes: 0, networkTxBytes: 0, diskBytes };
-  const stats = await docker.stats(id); let playersOnline: number | undefined; let playersMax: number | undefined;
-  if (await docker.platform(id).catch(() => 'minecraft') === 'minecraft') {
-    const players = await docker.minecraftStatus(id).catch(() => null);
-    if (players) { playersOnline = players.online; playersMax = players.max; }
-  }
-  return { status: state.status, ...stats, diskBytes, playersOnline, playersMax };
+  return docker.metrics(id);
 });
 
 app.get('/v1/servers/:id/files', async (request, reply) => {

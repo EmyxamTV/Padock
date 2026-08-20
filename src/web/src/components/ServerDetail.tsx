@@ -15,6 +15,8 @@ export function ServerDetail({ server, gateway, nodes, users, onChanged, onDelet
   const [tab, setTab] = useState<ServerTab>('console');
   const [stats, setStats] = useState<ServerStats>({ cpuPercent: 0, memoryBytes: 0, memoryLimitBytes: 0, networkRxBytes: 0, networkTxBytes: 0, diskBytes: 0 });
   const endRef = useRef<HTMLDivElement>(null);
+  const pendingLinesRef = useRef<string[]>([]);
+  const consoleFlushRef = useRef<number | undefined>(undefined);
   const canConsole = server.permissions.includes('console.read');
   const canCommand = server.permissions.includes('console.command');
   const canFiles = server.permissions.includes('files.read');
@@ -31,22 +33,31 @@ export function ServerDetail({ server, gateway, nodes, users, onChanged, onDelet
   useEffect(() => {
     setLines([]);
     setConsoleError('');
-    if (!canConsole || !consoleReady) return;
+    pendingLinesRef.current = [];
+    if (!canConsole || !consoleReady || tab !== 'console') return;
     const socket: Socket = io();
     socket.on('connect', () => socket.emit('console:subscribe', server.id));
-    socket.on('console:line', (line: string) => setLines((current) => [...current, ...line.split('\n').filter(Boolean)].slice(-500)));
+    socket.on('console:line', (line: string) => {
+      pendingLinesRef.current.push(...line.split('\n').filter(Boolean));
+      if (pendingLinesRef.current.length > 1000) pendingLinesRef.current = pendingLinesRef.current.slice(-1000);
+      if (!consoleFlushRef.current) consoleFlushRef.current = window.setTimeout(() => {
+        consoleFlushRef.current = undefined;
+        const pending = pendingLinesRef.current.splice(0);
+        if (pending.length) setLines((current) => [...current, ...pending].slice(-400));
+      }, 100);
+    });
     socket.on('console:ready', () => setConsoleError(''));
     socket.on('console:pending', () => setConsoleError(''));
     socket.on('console:error', setConsoleError);
-    return () => { socket.disconnect(); };
-  }, [server.id, server.status, canConsole, consoleReady]);
+    return () => { if (consoleFlushRef.current) window.clearTimeout(consoleFlushRef.current); consoleFlushRef.current = undefined; pendingLinesRef.current = []; socket.disconnect(); };
+  }, [server.id, server.status, canConsole, consoleReady, tab]);
 
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [lines]);
+  useEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }); }, [lines]);
 
   useEffect(() => {
     if (!canConsole) return;
-    const load = () => api<ServerStats>(`/api/servers/${server.id}/stats`).then(setStats).catch(() => undefined);
-    void load(); const timer = window.setInterval(load, server.status === 'running' || server.status === 'starting' ? 3000 : 15000); return () => window.clearInterval(timer);
+    const load = () => api<ServerStats>(`/api/servers/${server.id}/stats`).then((next) => setStats((current) => sameStats(current, next) ? current : next)).catch(() => undefined);
+    void load(); const timer = window.setInterval(load, server.status === 'running' || server.status === 'starting' ? 5000 : 30000); return () => window.clearInterval(timer);
   }, [server.id, server.status, canConsole]);
 
   useEffect(() => {
@@ -449,6 +460,7 @@ const defaultPropertyValues = Object.fromEntries(propertyDefinitions.map((item) 
 
 function formatDownloads(value: number) { return new Intl.NumberFormat('fr-FR', { notation: value >= 1000 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(value); }
 function formatBytes(value: number) { if (!value) return '0 o'; const units = ['o', 'Ko', 'Mo', 'Go', 'To']; const index = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024))); return `${(value / 1024 ** index).toFixed(index > 1 ? 1 : 0)} ${units[index]}`; }
+function sameStats(left: ServerStats, right: ServerStats) { return left.cpuPercent === right.cpuPercent && left.memoryBytes === right.memoryBytes && left.memoryLimitBytes === right.memoryLimitBytes && left.networkRxBytes === right.networkRxBytes && left.networkTxBytes === right.networkTxBytes && left.diskBytes === right.diskBytes; }
 function toSubdomain(value: string) { return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63).replace(/-+$/, ''); }
 function logLineClass(line: string) { if (/\b(error|fatal|exception|failed|killed|outofmemory)\b/i.test(line)) return 'log-error'; if (/\bwarn(?:ing)?\b/i.test(line)) return 'log-warning'; return ''; }
 function activityLabel(action: string) {

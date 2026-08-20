@@ -49,6 +49,18 @@ export interface ServerState {
   error?: string;
 }
 
+export interface ServerMetrics {
+  status: ServerStatus;
+  cpuPercent: number;
+  memoryBytes: number;
+  memoryLimitBytes: number;
+  networkRxBytes: number;
+  networkTxBytes: number;
+  diskBytes: number;
+  playersOnline?: number;
+  playersMax?: number;
+}
+
 export interface NetworkCounterSample { rxBytes: number; txBytes: number; measuredAt: number }
 
 export class NodeDocker {
@@ -212,6 +224,46 @@ export class NodeDocker {
       if ((error as { statusCode?: number }).statusCode === 404) return { status: 'missing' };
       throw error;
     }
+  }
+
+  async states(ids: string[]) {
+    const result: Record<string, ServerState> = {};
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(16, ids.length) }, async () => {
+      while (cursor < ids.length) {
+        const id = ids[cursor++];
+        if (id) result[id] = await this.state(id);
+      }
+    });
+    await Promise.all(workers);
+    return result;
+  }
+
+  async metrics(id: string): Promise<ServerMetrics> {
+    const state = await this.state(id);
+    const diskBytes = await this.diskUsage(id);
+    if (state.status !== 'running') return { status: state.status, cpuPercent: 0, memoryBytes: 0, memoryLimitBytes: 0, networkRxBytes: 0, networkTxBytes: 0, diskBytes };
+    const stats = await this.stats(id);
+    let playersOnline: number | undefined;
+    let playersMax: number | undefined;
+    if (await this.platform(id).catch(() => 'minecraft') === 'minecraft') {
+      const players = await this.minecraftStatus(id).catch(() => null);
+      if (players) { playersOnline = players.online; playersMax = players.max; }
+    }
+    return { status: state.status, ...stats, diskBytes, playersOnline, playersMax };
+  }
+
+  async metricsMany(ids: string[]) {
+    const result: Record<string, ServerMetrics> = {};
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(8, ids.length) }, async () => {
+      while (cursor < ids.length) {
+        const id = ids[cursor++];
+        if (id) result[id] = await this.metrics(id);
+      }
+    });
+    await Promise.all(workers);
+    return result;
   }
 
   async action(id: string, action: 'start' | 'stop' | 'restart' | 'kill') {

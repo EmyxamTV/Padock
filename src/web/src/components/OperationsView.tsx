@@ -1,20 +1,23 @@
+import { useState } from 'react';
 import { api, type PanelJob, type PanelNotification } from '../api';
 
 export function OperationsView({ jobs, notifications, onChanged, onOpenServer }: { jobs: PanelJob[]; notifications: PanelNotification[]; onChanged: () => void; onOpenServer: (id: string) => void }) {
+  const [jobLimit, setJobLimit] = useState(75);
+  const [notificationLimit, setNotificationLimit] = useState(50);
   async function retry(id: string) { await api(`/api/jobs/${id}/retry`, { method: 'POST' }); onChanged(); }
   async function cancel(id: string) { if (!confirm('Annuler cette opération en attente ?')) return; await api(`/api/jobs/${id}`, { method: 'DELETE' }); onChanged(); }
   async function readAll() { await api('/api/notifications/read-all', { method: 'POST' }); onChanged(); }
   return <div className="operations-layout">
     <section className="content-panel operations-panel">
       <div className="content-toolbar"><div><p className="eyebrow">FILE PERSISTANTE</p><h2>Opérations</h2><small>Les opérations continuent même si vous fermez cette page.</small></div><span className="role-badge active">{jobs.filter((job) => job.status === 'running' || job.status === 'queued').length} active(s)</span></div>
-      <div className="operation-list">{jobs.map((job) => <article key={job.id} className={`operation-item ${job.status}`}>
+      <div className="operation-list">{jobs.slice(0, jobLimit).map((job) => <article key={job.id} className={`operation-item ${job.status}`}>
         <span className="operation-icon">{jobIcon(job.kind)}</span><div className="operation-main"><div><strong>{jobLabel(job.kind)}</strong><span className={`result ${job.status}`}>{statusLabel(job.status)}</span></div><small>{job.step} · {new Date(job.updatedAt).toLocaleString('fr-FR')}</small><progress value={job.progress} max={100}/>{job.error && <p className="operation-error">{job.error}</p>}</div>
         <div className="operation-actions">{job.serverId && <button className="secondary compact" onClick={() => onOpenServer(job.serverId!)}>Serveur</button>}{job.status === 'failed' && <button className="secondary compact" onClick={() => retry(job.id)}>Relancer</button>}{job.status === 'queued' && <button className="table-action" onClick={() => cancel(job.id)}>Annuler</button>}</div>
-      </article>)}{!jobs.length && <p className="panel-empty">Aucune opération enregistrée.</p>}</div>
+      </article>)}{!jobs.length && <p className="panel-empty">Aucune opération enregistrée.</p>}{jobs.length > jobLimit && <button className="secondary list-more" onClick={() => setJobLimit((value) => value + 75)}>Afficher plus d’opérations</button>}</div>
     </section>
     <section className="content-panel notification-panel">
       <div className="content-toolbar"><div><p className="eyebrow">ALERTES</p><h2>Notifications</h2><small>Crashs, stockage, sauvegardes et infrastructure</small></div><button className="secondary compact" onClick={readAll}>Tout marquer comme lu</button></div>
-      <div className="notification-list">{notifications.map((item) => <button key={item.id} className={`${item.level} ${item.readAt ? 'read' : ''}`} onClick={() => item.link?.startsWith('server:') && onOpenServer(item.link.slice(7))}><span>{notificationIcon(item.level)}</span><div><strong>{item.title}</strong><p>{item.message}</p><small>{new Date(item.createdAt).toLocaleString('fr-FR')}</small></div></button>)}{!notifications.length && <p className="panel-empty">Aucune notification.</p>}</div>
+      <div className="notification-list">{notifications.slice(0, notificationLimit).map((item) => <button key={item.id} className={`${item.level} ${item.readAt ? 'read' : ''}`} onClick={() => item.link?.startsWith('server:') && onOpenServer(item.link.slice(7))}><span>{notificationIcon(item.level)}</span><div><strong>{item.title}</strong><p>{item.message}</p><small>{new Date(item.createdAt).toLocaleString('fr-FR')}</small></div></button>)}{!notifications.length && <p className="panel-empty">Aucune notification.</p>}{notifications.length > notificationLimit && <button className="secondary list-more" onClick={() => setNotificationLimit((value) => value + 50)}>Afficher plus de notifications</button>}</div>
     </section>
   </div>;
 }
