@@ -83,6 +83,7 @@ try {
   const catalog = await call('/api/steam/games', { cookie });
   assert.equal(catalog.status, 200);
   assert.deepEqual(catalog.body.map((game) => game.id), ['rust', 'garrys-mod', '7-days-to-die']);
+  assert.equal(catalog.body.find((game) => game.id === 'rust').recommendedMemoryMb, 12288);
 
   const creation = await call('/api/servers', {
     method: 'POST',

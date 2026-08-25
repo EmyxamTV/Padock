@@ -94,6 +94,7 @@ main td{font-size:13px;line-height:1.5}
 .detail-metrics strong,.monitoring-kpis strong,.installed-list strong,.resource-save strong,.resource-recommendation strong{font-size:13px;line-height:1.4}
 .notification-button span{min-width:20px;height:20px;font-size:11px;line-height:20px}
 .console-output{font-size:13px;line-height:1.55}
+.console-runtime-note{display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px;padding:12px 16px;border-bottom:1px solid #4a3a22;background:#211a10;color:#d8b66c;font-size:13px}.console-runtime-note span{color:#b7a077;line-height:1.5}.console-runtime-note.ready{border-color:#28503d;background:#112219;color:#72d6a2}.console-runtime-note.ready span{color:#8ab39a}.console-output>div.known-runtime-warning{background:#1c1911;color:#d6b363}.log-repeat{display:inline-flex;align-items:center;margin-left:10px;padding:1px 6px;border-radius:99px;background:#302b1d;color:#daba72;font-size:11px;font-style:normal;font-weight:700}
 .list-more{width:100%;margin-top:6px}.audit-more{display:block;margin:14px auto 0}
 
 .platform-picker{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:20px}

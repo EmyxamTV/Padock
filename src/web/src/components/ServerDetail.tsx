@@ -97,6 +97,9 @@ export function ServerDetail({ server, gateway, nodes, users, onChanged, onDelet
   const statusLabel = serverStatusLabels[server.status];
   const diagnostic = serverDiagnostic(server);
   const consoleLive = server.status === 'running' || server.status === 'starting';
+  const displayedLines = collapseConsoleLines(lines);
+  const knownRustUploadWarning = server.steam?.presetId === 'rust' && lines.some(isKnownRustServerWarning);
+  const rustStartupComplete = server.steam?.presetId === 'rust' && lines.some((line) => /Server startup complete/i.test(line));
   return <div className="detail">
     <div className="detail-summary">
       <div className="detail-state"><span className={`status-orb ${server.status}`} /><div><span className={`badge ${server.status}`}>{statusLabel}</span><p>{server.platform === 'steamcmd' ? `${server.steam?.gameName ?? server.version} · SteamCMD` : server.software === 'CUSTOM' ? 'Jar personnalisé' : `${server.software} ${server.version}`}</p></div></div>
@@ -125,7 +128,8 @@ export function ServerDetail({ server, gateway, nodes, users, onChanged, onDelet
 
     {tab === 'console' && <section className="console-panel">
       <div className="console-head"><div><span className="terminal-dot red"/><span className="terminal-dot yellow"/><span className="terminal-dot green"/></div><strong>Console du serveur</strong><div className="console-tools"><button type="button" onClick={() => setLines([])} disabled={!lines.length}>Effacer</button><span className={`live ${consoleLive ? '' : 'offline'}`}><i /> {consoleLive ? 'LIVE' : 'HORS LIGNE'}</span></div></div>
-      <div className="console-output">{lines.length ? lines.map((line, index) => <div className={logLineClass(line)} key={index}><span>{String(index + 1).padStart(3, '0')}</span>{line}</div>) : <p className="console-empty">{consoleLive ? 'Connexion à la console…' : 'Démarrez le serveur pour afficher les logs en direct.'}</p>}<div ref={endRef} /></div>
+      {knownRustUploadWarning && <div className={`console-runtime-note ${rustStartupComplete ? 'ready' : ''}`}><strong>{rustStartupComplete ? 'Rust est prêt' : 'Avertissement Rust connu'}</strong><span>{rustStartupComplete ? 'Le démarrage est terminé : les messages « AsyncResourceUpload failed » précédents étaient sans conséquence.' : '« AsyncResourceUpload failed » est un message Unity non bloquant dans les builds serveur. Attendez « Server startup complete » pour confirmer que Rust est prêt.'}</span></div>}
+      <div className="console-output">{displayedLines.length ? displayedLines.map((entry, index) => <div className={logLineClass(entry.line)} key={`${index}-${entry.line}`}><span>{String(index + 1).padStart(3, '0')}</span>{entry.line}{entry.count > 1 && <em className="log-repeat">×{entry.count}</em>}</div>) : <p className="console-empty">{consoleLive ? 'Connexion à la console…' : 'Démarrez le serveur pour afficher les logs en direct.'}</p>}<div ref={endRef} /></div>
       <form className="command" onSubmit={command}><span>›</span><input name="command" placeholder={canCommand ? (server.platform === 'steamcmd' ? 'Entrez une commande console' : 'Entrez une commande sans /') : 'Console en lecture seule'} disabled={!canCommand || server.status !== 'running'} autoComplete="off"/><button disabled={!canCommand || server.status !== 'running'}>Envoyer</button></form>
     </section>}
     {tab === 'monitoring' && <MonitoringPanel server={server} />}
@@ -201,7 +205,8 @@ function ServerManagementPanel({ server, gateway, onChanged }: { server: Server;
 }
 
 function SteamRuntimePanel({ server }: { server: Server }) {
-  return <section className="content-panel steam-runtime-panel"><div className="content-toolbar"><div><h2>Installation SteamCMD</h2><small>Le jeu est vérifié et mis à jour automatiquement à chaque démarrage</small></div><span className="role-badge active">APP {server.steam?.appId ?? '—'}</span></div><div className="steam-port-list">{server.ports.map((port) => <div key={`${port.internalPort}-${port.protocol}`}><span><strong>{port.name}</strong><small>{port.protocol.toUpperCase()}</small></span><code>{port.hostPort} → {port.internalPort}</code></div>)}</div></section>;
+  const rustMemoryLow = server.steam?.presetId === 'rust' && server.memoryMb < 12288;
+  return <section className="content-panel steam-runtime-panel"><div className="content-toolbar"><div><h2>Installation SteamCMD</h2><small>Le jeu est vérifié et mis à jour automatiquement à chaque démarrage</small></div><span className="role-badge active">APP {server.steam?.appId ?? '—'}</span></div>{rustMemoryLow && <div className="runtime-diagnostic warning"><strong>Mémoire sous la recommandation</strong><span>Facepunch recommande actuellement 12 Go de RAM libre. Passez cette instance à au moins 12 288 Mo si le démarrage échoue ou si Rust manque de mémoire.</span></div>}<div className="steam-port-list">{server.ports.map((port) => <div key={`${port.internalPort}-${port.protocol}`}><span><strong>{port.name}</strong><small>{port.protocol.toUpperCase()}</small></span><code>{port.hostPort} → {port.internalPort}</code></div>)}</div></section>;
 }
 
 function ActivityPanel({ server }: { server: Server }) {
@@ -462,7 +467,17 @@ function formatDownloads(value: number) { return new Intl.NumberFormat('fr-FR', 
 function formatBytes(value: number) { if (!value) return '0 o'; const units = ['o', 'Ko', 'Mo', 'Go', 'To']; const index = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024))); return `${(value / 1024 ** index).toFixed(index > 1 ? 1 : 0)} ${units[index]}`; }
 function sameStats(left: ServerStats, right: ServerStats) { return left.cpuPercent === right.cpuPercent && left.memoryBytes === right.memoryBytes && left.memoryLimitBytes === right.memoryLimitBytes && left.networkRxBytes === right.networkRxBytes && left.networkTxBytes === right.networkTxBytes && left.diskBytes === right.diskBytes; }
 function toSubdomain(value: string) { return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63).replace(/-+$/, ''); }
-function logLineClass(line: string) { if (/\b(error|fatal|exception|failed|killed|outofmemory)\b/i.test(line)) return 'log-error'; if (/\bwarn(?:ing)?\b/i.test(line)) return 'log-warning'; return ''; }
+function collapseConsoleLines(lines: string[]) {
+  const collapsed: Array<{ line: string; count: number }> = [];
+  for (const line of lines) {
+    const previous = collapsed.at(-1);
+    if (previous?.line === line) previous.count += 1;
+    else collapsed.push({ line, count: 1 });
+  }
+  return collapsed;
+}
+function isKnownRustServerWarning(line: string) { return /^AsyncResourceUpload failed\.?$/i.test(line.trim()); }
+function logLineClass(line: string) { if (isKnownRustServerWarning(line)) return 'log-warning known-runtime-warning'; if (/\b(error|fatal|exception|failed|killed|outofmemory)\b/i.test(line)) return 'log-error'; if (/\bwarn(?:ing)?\b/i.test(line)) return 'log-warning'; return ''; }
 function activityLabel(action: string) {
   const labels: Record<string, string> = {
     'server.installing': 'Création en cours', 'server.create': 'Serveur créé', 'server.install_failed': 'Échec de la création',

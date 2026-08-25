@@ -29,7 +29,7 @@ export const steamGames: SteamGamePreset[] = [
       { name: 'Jeu', internalPort: 28015, allocationOffset: 0, protocol: 'udp' },
       { name: 'Requêtes Steam', internalPort: 28016, allocationOffset: 1, protocol: 'udp' },
     ],
-    recommendedMemoryMb: 8192,
+    recommendedMemoryMb: 12288,
     recommendedDiskMb: 30720,
   },
   {
