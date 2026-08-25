@@ -14,7 +14,7 @@ const STATUS = utils.sftp.STATUS_CODE;
 
 type OpenResource =
   | { type: 'file'; file: FileHandle; target: string; writable: boolean }
-  | { type: 'directory'; entries: Array<{ filename: string; longname: string; attrs: Attributes }>; offset: number };
+  | { type: 'directory'; target: string; entries: Array<{ filename: string; longname: string; attrs: Attributes }>; offset: number };
 
 export interface AgentSftpAccount {
   id: string;
@@ -91,11 +91,16 @@ export async function startSftpServer(options: {
   serversDir: string;
   accounts: SftpAccountRegistry;
   hostKeyPath: string;
+  keepaliveIntervalMs?: number;
+  keepaliveCountMax?: number;
   log: (message: string) => void;
 }) {
   const hostKey = await loadOrCreateHostKey(options.hostKeyPath);
-  const server = new Server({ hostKeys: [hostKey], ident: 'SSH-2.0-Padock_SFTP_1.1.0' }, (client, info) => {
+  const keepaliveInterval = boundedInteger(options.keepaliveIntervalMs, 30_000, 5_000, 300_000);
+  const keepaliveCountMax = boundedInteger(options.keepaliveCountMax, 20, 1, 100);
+  const server = new Server({ hostKeys: [hostKey], ident: 'SSH-2.0-Padock_SFTP_1.2.0', keepaliveInterval, keepaliveCountMax }, (client, info) => {
     let account: AgentSftpAccount | undefined;
+    const connectionLabel = () => `${account?.username ?? 'non-authentifié'}@${info.ip}`;
 
     client.on('authentication', (context) => {
       if (context.method !== 'password') {
@@ -113,13 +118,14 @@ export async function startSftpServer(options: {
     client.on('ready', () => {
       client.on('session', (accept) => {
         const session = accept();
+        session.on('error', (error: Error) => options.log(`Erreur de session SFTP ${connectionLabel()} : ${error.message}`));
         session.on('sftp', (acceptSftp) => {
           if (!account) return;
-          serveSftp(acceptSftp(), path.resolve(options.serversDir, account.serverId), { paths: account.paths, readOnly: account.readOnly });
+          serveSftp(acceptSftp(), path.resolve(options.serversDir, account.serverId), { paths: account.paths, readOnly: account.readOnly }, (error) => options.log(`Erreur du canal SFTP ${connectionLabel()} : ${error.message}`));
         });
       });
     });
-    client.on('error', () => undefined);
+    client.on('error', (error: Error) => options.log(`Erreur de connexion SFTP ${connectionLabel()} : ${error.message}`));
     options.log(`Connexion SFTP reçue depuis ${info.ip}.`);
   });
   server.on('error', (error: Error) => options.log(`Erreur SFTP : ${error.message}`));
@@ -131,7 +137,7 @@ export async function startSftpServer(options: {
   return server;
 }
 
-function serveSftp(sftp: SFTPWrapper, base: string, access: SftpAccessPolicy) {
+function serveSftp(sftp: SFTPWrapper, base: string, access: SftpAccessPolicy, onError: (error: Error) => void) {
   const resources = new Map<number, OpenResource>();
   let nextHandle = 1;
   const respond = (requestId: number, task: () => Promise<void>) => {
@@ -170,7 +176,7 @@ function serveSftp(sftp: SFTPWrapper, base: string, access: SftpAccessPolicy) {
         return { filename: entry.name, longname: longName(entry.name, info), attrs: attributes(info) };
       }));
     const handleId = nextHandle++;
-    resources.set(handleId, { type: 'directory', entries, offset: 0 });
+    resources.set(handleId, { type: 'directory', target, entries, offset: 0 });
     sftp.handle(requestId, encodeHandle(handleId));
   }));
 
@@ -216,8 +222,8 @@ function serveSftp(sftp: SFTPWrapper, base: string, access: SftpAccessPolicy) {
 
   sftp.on('FSTAT', (requestId, rawHandle) => respond(requestId, async () => {
     const resource = resources.get(decodeHandle(rawHandle));
-    if (!resource || resource.type !== 'file') throw sftpError(STATUS.FAILURE, 'Fichier non ouvert.');
-    sftp.attrs(requestId, attributes(await resource.file.stat()));
+    if (!resource) throw sftpError(STATUS.FAILURE, 'Ressource non ouverte.');
+    sftp.attrs(requestId, attributes(resource.type === 'file' ? await resource.file.stat() : await stat(resource.target)));
   }));
 
   sftp.on('FSETSTAT', (requestId, rawHandle, attrs) => respond(requestId, async () => {
@@ -293,6 +299,7 @@ function serveSftp(sftp: SFTPWrapper, base: string, access: SftpAccessPolicy) {
   sftp.on('READLINK', (requestId) => sftp.status(requestId, STATUS.OP_UNSUPPORTED, 'Les liens symboliques sont désactivés.'));
   sftp.on('SYMLINK', (requestId) => sftp.status(requestId, STATUS.OP_UNSUPPORTED, 'Les liens symboliques sont désactivés.'));
   sftp.on('EXTENDED', (requestId) => sftp.status(requestId, STATUS.OP_UNSUPPORTED));
+  sftp.on('error', onError);
   sftp.on('close', () => {
     for (const resource of resources.values()) if (resource.type === 'file') void resource.file.close().then(() => resource.writable ? applyOwner(base, resource.target) : undefined).catch(() => undefined);
     resources.clear();
@@ -312,8 +319,9 @@ async function loadOrCreateHostKey(hostKeyPath: string) {
 
 function resolveTarget(base: string, value: string, allowRoot = true) {
   if (value.includes('\0')) throw sftpError(STATUS.PERMISSION_DENIED, 'Chemin invalide.');
-  const parts = value.replace(/\\/g, '/').split('/').filter((part) => part && part !== '.');
-  if (parts.includes('..')) throw sftpError(STATUS.PERMISSION_DENIED, 'Chemin hors du serveur.');
+  const remote = value.replace(/\\/g, '/');
+  const normalized = path.posix.normalize(remote.startsWith('/') ? remote : `/${remote}`);
+  const parts = normalized.split('/').filter(Boolean);
   const target = path.resolve(base, ...parts);
   if (target !== base && !target.startsWith(`${base}${path.sep}`)) throw sftpError(STATUS.PERMISSION_DENIED, 'Chemin hors du serveur.');
   if (!allowRoot && target === base) throw sftpError(STATUS.PERMISSION_DENIED, 'Le dossier racine est protégé.');
@@ -391,6 +399,7 @@ function remotePath(base: string, target: string) {
 function encodeHandle(id: number) { const handle = Buffer.alloc(4); handle.writeUInt32BE(id); return handle; }
 function decodeHandle(handle: Buffer) { if (handle.length !== 4) throw sftpError(STATUS.FAILURE, 'Handle invalide.'); return handle.readUInt32BE(); }
 function sftpError(code: number, message: string) { return Object.assign(new Error(message), { sftpCode: code }); }
+function boundedInteger(value: number | undefined, fallback: number, minimum: number, maximum: number) { return Number.isInteger(value) ? Math.min(maximum, Math.max(minimum, value!)) : fallback; }
 
 function mapError(error: unknown) {
   const value = error as NodeJS.ErrnoException & { sftpCode?: number };

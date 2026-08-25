@@ -15,6 +15,7 @@ let server;
 
 try {
   await mkdir(path.join(serverDir, 'plugins'), { recursive: true });
+  await mkdir(path.join(serverDir, 'plugins', 'nested'), { recursive: true });
   await mkdir(path.join(serverDir, 'world'), { recursive: true });
   await writeFile(path.join(serverDir, 'plugins', 'existing.txt'), 'ok');
   await registry.load();
@@ -26,6 +27,12 @@ try {
   await withSftp(port, 'builder', 'builder-password', async (sftp) => {
     const rootEntries = await readdir(sftp, '/');
     assert.deepEqual(rootEntries.map((entry) => entry.filename).sort(), ['plugins']);
+    assert.equal(await realpath(sftp, '/plugins/nested/..'), '/plugins');
+    assert.equal(await realpath(sftp, '/plugins/..'), '/');
+    const directoryHandle = await opendir(sftp, '/plugins');
+    assert.equal((await fstat(sftp, directoryHandle)).isDirectory(), true);
+    await close(sftp, directoryHandle);
+    await expectFailure(() => readdir(sftp, '/plugins/../../world'));
     await write(sftp, '/plugins/created.txt', 'created');
     await expectFailure(() => write(sftp, '/world/forbidden.txt', 'blocked'));
     await expectFailure(() => rmdir(sftp, '/plugins'));
@@ -36,7 +43,7 @@ try {
     await expectFailure(() => write(sftp, '/plugins/read-only.txt', 'blocked'));
   });
 
-  console.log('SFTP smoke test passed: folder isolation and read-only mode are enforced.');
+  console.log('SFTP smoke test passed: parent navigation, directory handles, folder isolation and read-only mode work.');
 } finally {
   if (server) await new Promise((resolve) => server.close(resolve));
   await rm(root, { recursive: true, force: true });
@@ -60,6 +67,10 @@ function withSftp(port, username, password, task) {
 }
 
 function readdir(sftp, target) { return new Promise((resolve, reject) => sftp.readdir(target, (error, entries) => error ? reject(error) : resolve(entries))); }
+function realpath(sftp, target) { return new Promise((resolve, reject) => sftp.realpath(target, (error, resolved) => error ? reject(error) : resolve(resolved))); }
+function opendir(sftp, target) { return new Promise((resolve, reject) => sftp.opendir(target, (error, handle) => error ? reject(error) : resolve(handle))); }
+function fstat(sftp, handle) { return new Promise((resolve, reject) => sftp.fstat(handle, (error, stats) => error ? reject(error) : resolve(stats))); }
+function close(sftp, handle) { return new Promise((resolve, reject) => sftp.close(handle, (error) => error ? reject(error) : resolve())); }
 function read(sftp, target) { return new Promise((resolve, reject) => sftp.readFile(target, (error, content) => error ? reject(error) : resolve(content))); }
 function write(sftp, target, content) { return new Promise((resolve, reject) => sftp.writeFile(target, content, (error) => error ? reject(error) : resolve())); }
 function rmdir(sftp, target) { return new Promise((resolve, reject) => sftp.rmdir(target, (error) => error ? reject(error) : resolve())); }

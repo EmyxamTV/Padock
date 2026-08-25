@@ -20,6 +20,8 @@ const backupsDir = path.resolve(padockEnv('BACKUPS_DIR') ?? (isProduction ? '/va
 const sftpEnabled = padockEnv('SFTP_ENABLED') !== 'false';
 const sftpHost = padockEnv('SFTP_HOST') ?? '0.0.0.0';
 const sftpPort = Number(padockEnv('SFTP_PORT') ?? 2022);
+const sftpKeepaliveIntervalMs = Number(padockEnv('SFTP_KEEPALIVE_INTERVAL_MS') ?? 30_000);
+const sftpKeepaliveCountMax = Number(padockEnv('SFTP_KEEPALIVE_COUNT_MAX') ?? 20);
 const gatewayEnabled = padockEnv('GATEWAY_ENABLED') === 'true';
 const gatewayPort = Number(padockEnv('GATEWAY_PORT') ?? 25565);
 const sftpHostKey = path.resolve(padockEnv('SFTP_HOST_KEY') ?? path.join(dataDir, '.padock-sftp-host-key'));
@@ -412,7 +414,7 @@ app.setErrorHandler((error, _request, reply) => {
 });
 
 await app.listen({ host, port });
-if (sftpEnabled) await startSftpServer({ host: sftpHost, port: sftpPort, serversDir: dataDir, accounts: sftpAccounts, hostKeyPath: sftpHostKey, log: (message) => app.log.info(message) });
+if (sftpEnabled) await startSftpServer({ host: sftpHost, port: sftpPort, serversDir: dataDir, accounts: sftpAccounts, hostKeyPath: sftpHostKey, keepaliveIntervalMs: sftpKeepaliveIntervalMs, keepaliveCountMax: sftpKeepaliveCountMax, log: (message) => app.log.info(message) });
 
 function parseId(params: unknown, reply: { code: (status: number) => { send: (body: unknown) => unknown } }) {
   const parsed = idSchema.safeParse((params as { id?: string }).id);

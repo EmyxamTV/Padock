@@ -238,6 +238,8 @@ PADOCK_BACKUPS_DIR=/var/lib/padock/backups
 
 PADOCK_SFTP_PUBLIC_HOST=sftp.example.com
 PADOCK_SFTP_PUBLIC_PORT=2022
+PADOCK_SFTP_KEEPALIVE_INTERVAL_MS=30000
+PADOCK_SFTP_KEEPALIVE_COUNT_MAX=20
 PADOCK_MINECRAFT_IMAGE=itzg/minecraft-server:java25
 PADOCK_STEAMCMD_IMAGE=steamcmd/steamcmd:ubuntu-22
 DOCKER_GID=999
@@ -283,7 +285,7 @@ Remplacez :
 
 Conservez `PADOCK_STEAMCMD_IMAGE=steamcmd/steamcmd:ubuntu-22` sauf si vous avez validé une autre image compatible. La première création d’un jeu Steam télécharge l’image et les fichiers du serveur ; elle peut donc prendre plusieurs minutes.
 
-Ne terminez pas `PADOCK_PUBLIC_URL` par `/`. L’hôte SFTP doit être un nom DNS ou une IP joignable par les utilisateurs, sans `sftp://` et sans numéro de port.
+Ne terminez pas `PADOCK_PUBLIC_URL` par `/`. L’hôte SFTP doit être un nom DNS ou une IP joignable par les utilisateurs, sans `sftp://` et sans numéro de port. Les valeurs SFTP de keepalive par défaut envoient un contrôle toutes les 30 secondes et tolèrent 20 absences de réponse avant fermeture ; elles conviennent généralement à Dokploy, aux pare-feu et aux connexions NAT.
 
 `PADOCK_GATEWAY_DOMAIN` contient le domaine de base, sans `*.` et sans protocole. Utilisez donc `mc.example.com`, pas `*.mc.example.com` et pas `https://mc.example.com`.
 
@@ -464,7 +466,7 @@ Port      : 2022
 Utilisateur et mot de passe : valeurs affichées lors de la création du compte
 ```
 
-Vérifiez qu’un compte limité ne peut ni remonter hors du serveur ni ouvrir un dossier non autorisé. Supprimez les comptes de test inutiles.
+Vérifiez qu’un compte limité peut utiliser le bouton de dossier parent jusqu’à la racine SFTP, sans jamais sortir du serveur ni ouvrir un dossier non autorisé. Laissez aussi la connexion inactive quelques minutes pour confirmer que le keepalive traverse correctement votre pare-feu. Supprimez ensuite les comptes de test inutiles.
 
 ### Tester une sauvegarde
 

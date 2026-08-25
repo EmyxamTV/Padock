@@ -81,6 +81,8 @@ PADOCK_SERVERS_DIR=/var/lib/padock/servers
 PADOCK_BACKUPS_DIR=/var/lib/padock/backups
 PADOCK_SFTP_PUBLIC_HOST=sftp.example.com
 PADOCK_SFTP_PUBLIC_PORT=2022
+PADOCK_SFTP_KEEPALIVE_INTERVAL_MS=30000
+PADOCK_SFTP_KEEPALIVE_COUNT_MAX=20
 PADOCK_STEAMCMD_IMAGE=steamcmd/steamcmd:ubuntu-22
 CURSEFORGE_API_KEY='$votre-cle-curseforge'
 ```
@@ -93,7 +95,7 @@ docker compose up -d --build
 
 Les anciennes variables `PANELMC_*`, les conteneurs Minecraft nommés `panelmc-<id>` et les métadonnées `.panelmc` restent reconnus automatiquement. Une installation existante peut ainsi être redéployée avant de migrer progressivement son `.env` vers `PADOCK_*`.
 
-Le Panel écoute sur le port `3000` et le SFTP sur le port `2022`. La première visite permet de créer l'administrateur. Placez le Panel derrière Caddy, Traefik ou Nginx avec HTTPS et ouvrez le port SFTP uniquement si vous souhaitez l’utiliser à distance.
+Le Panel écoute sur le port `3000` et le SFTP sur le port `2022`. La première visite permet de créer l'administrateur. Placez le Panel derrière Caddy, Traefik ou Nginx avec HTTPS et ouvrez le port SFTP uniquement si vous souhaitez l’utiliser à distance. Le serveur envoie un keepalive toutes les 30 secondes et tolère 20 tentatives sans réponse ; ces valeurs évitent les coupures rapides derrière un pare-feu ou un NAT tout en restant configurables.
 
 La clé CurseForge se crée dans la [console développeur CurseForge](https://console.curseforge.com/). Copiez-la intégralement entre apostrophes simples dans `.env`. Elles protègent les caractères spéciaux tels que `$`, `#`, `!` et `&` : ne doublez pas les `$` et n’ajoutez aucun antislash. Après une modification du fichier, appliquez-la avec `docker compose up -d --force-recreate padock agent`. Sans clé, toutes les fonctions du Panel restent disponibles sauf le catalogue et l’installation CurseForge.
 
