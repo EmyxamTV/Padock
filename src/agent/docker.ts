@@ -1,11 +1,17 @@
-import { mkdir, readdir, stat } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import Docker from 'dockerode';
 import { padockEnv } from './config.js';
+import * as tar from 'tar';
 
 const IMAGE = padockEnv('MINECRAFT_IMAGE') ?? 'itzg/minecraft-server:java25';
 const STEAMCMD_IMAGE = padockEnv('STEAMCMD_IMAGE') ?? 'steamcmd/steamcmd:ubuntu-22';
+const BO3_MOON_PRESET = 'bo3-zombies-moon';
+const BO3_T7X_URL = 'https://master.bo3.eu/t7x/t7x.exe';
+const BO3_CONFIG_URL = 'https://github.com/Dss0/t7-server-config/archive/refs/heads/main.tar.gz';
+const BO3_MOON_FILES = ['en_zm_patch.ff', 'en_zm_common.ff', 'zm_patch.ff', 'zm_common.fd', 'zm_common.ff', 'zm_levelcommon.ff', 'en_zm_moon.ff', 'en_zm_moon_patch.ff', 'zm_moon.ff', 'zm_moon_patch.ff'];
 const GATEWAY_ENABLED = padockEnv('GATEWAY_ENABLED') === 'true';
 const GATEWAY_BACKEND_BIND = padockEnv('GATEWAY_BACKEND_BIND')?.trim() || '127.0.0.1';
 export const MINECRAFT_INTERNAL_PORT = 25565;
@@ -125,6 +131,8 @@ export class NodeDocker {
     if (!input.steam || !input.ports.length) throw Object.assign(new Error('Configuration SteamCMD incomplète.'), { statusCode: 400 });
     await this.ensureImage(STEAMCMD_IMAGE);
     await this.installSteamApp(input, serverDir);
+    const bo3Moon = input.steam.presetId === BO3_MOON_PRESET;
+    if (bo3Moon) await this.installBo3Moon(input, serverDir);
 
     const exposedPorts: Record<string, object> = {};
     const portBindings: Record<string, Array<{ HostPort: string }>> = {};
@@ -152,7 +160,15 @@ export class NodeDocker {
       `PADOCK_GAME_PORT=${uniqueInternalPorts[0]}`,
       `PADOCK_QUERY_PORT=${uniqueInternalPorts[1] ?? uniqueInternalPorts[0]}`,
     ];
-    const command = [
+    const command = bo3Moon ? [
+      'set -e',
+      'export DEBIAN_FRONTEND=noninteractive WINEDEBUG=-all WINEPREFIX=/data/wineprefix',
+      'if ! command -v wine >/dev/null 2>&1 || ! command -v xvfb-run >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends wine wine64 xvfb xauth; fi',
+      'mkdir -p "$WINEPREFIX"',
+      '/usr/bin/steamcmd +force_install_dir /data/server +login anonymous +@sSteamCmdForcePlatformType windows +app_update "$STEAM_APP_ID" +quit',
+      'cd /data/server/UnrankedServer',
+      'exec xvfb-run -a /bin/bash -lc "$PADOCK_STARTUP_COMMAND"',
+    ].join('\n') : [
       'set -e',
       'mkdir -p /data/server',
       '/usr/bin/steamcmd +force_install_dir /data/server +login anonymous +app_update "$STEAM_APP_ID" +quit',
@@ -162,6 +178,7 @@ export class NodeDocker {
     const container = await this.docker.createContainer({
       name: this.containerName(input.id),
       Image: STEAMCMD_IMAGE,
+      User: bo3Moon ? 'root' : undefined,
       Entrypoint: ['/bin/bash', '-lc'],
       Cmd: [command],
       Env: env,
@@ -183,11 +200,40 @@ export class NodeDocker {
     return container.id;
   }
 
+  private async installBo3Moon(input: DockerServerInput, serverDir: string) {
+    const serverRoot = path.join(serverDir, 'server', 'UnrankedServer');
+    await stat(serverRoot).catch(() => { throw new Error('SteamCMD n’a pas installé le dossier UnrankedServer de BO3.'); });
+    const temporary = await mkdtemp(path.join(os.tmpdir(), 'padock-bo3-'));
+    try {
+      const [client, configs] = await Promise.all([downloadAsset(BO3_T7X_URL), downloadAsset(BO3_CONFIG_URL)]);
+      if (client.subarray(0, 2).toString() !== 'MZ') throw new Error('Le téléchargement T7x ne contient pas un exécutable Windows valide.');
+      if (configs[0] !== 0x1f || configs[1] !== 0x8b) throw new Error('Le téléchargement de la configuration T7x ne contient pas une archive gzip valide.');
+      await writeFile(path.join(serverRoot, 't7x.exe'), client);
+      const archive = path.join(temporary, 'config.tar.gz');
+      await writeFile(archive, configs);
+      await tar.x({ file: archive, cwd: temporary });
+      const source = path.join(temporary, 't7-server-config-main');
+      await cp(path.join(source, 't7x'), path.join(serverRoot, 't7x'), { recursive: true, force: false });
+      await cp(path.join(source, 'zone'), path.join(serverRoot, 'zone'), { recursive: true, force: false });
+      const configPath = path.join(serverRoot, 'zone', 'server_zm.cfg');
+      const current = await readFile(configPath, 'utf8');
+      const safeName = input.name.replace(/["\\\r\n]/g, '').slice(0, 40);
+      const config = current
+        .replace(/^set live_steam_server_name .*$/m, `set live_steam_server_name "${safeName}"`)
+        .replace(/^set sv_maprotation .*$/m, 'set sv_maprotation "gametype zclassic map zm_moon"');
+      await writeFile(configPath, config, 'utf8');
+      await writeFile(path.join(serverRoot, 'MOON_FILES_REQUIRED.txt'), `Copiez depuis votre installation Steam de BO3 avec Zombies Chronicles vers ce dossier zone :\n${BO3_MOON_FILES.join('\n')}\n\nLe fichier zm_moon.fd doit aussi etre copie s'il est present.\n`, 'utf8');
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  }
+
   private async installSteamApp(input: DockerServerInput, serverDir: string) {
+    const windowsDepot = input.steam!.presetId === BO3_MOON_PRESET ? ['+@sSteamCmdForcePlatformType', 'windows'] : [];
     const installer = await this.docker.createContainer({
       name: `padock-install-${input.id}-${Date.now()}`,
       Image: STEAMCMD_IMAGE,
-      Cmd: ['+force_install_dir', '/data/server', '+login', 'anonymous', '+app_update', String(input.steam!.appId), 'validate', '+quit'],
+      Cmd: ['+force_install_dir', '/data/server', '+login', 'anonymous', ...windowsDepot, '+app_update', String(input.steam!.appId), 'validate', '+quit'],
       HostConfig: { Binds: [`${serverDir}:/data`] },
     });
     try {
@@ -270,6 +316,11 @@ export class NodeDocker {
     const container = await this.container(id);
     if (action === 'start') {
       const info = await container.inspect();
+      if (readLabel(info.Config.Labels, 'steam-preset') === BO3_MOON_PRESET) {
+        const zone = path.join(this.dataDir, id, 'server', 'UnrankedServer', 'zone');
+        const missing = (await Promise.all(BO3_MOON_FILES.map(async (file) => await stat(path.join(zone, file)).then(() => undefined, () => file)))).filter((file): file is string => Boolean(file));
+        if (missing.length) throw Object.assign(new Error(`Fichiers Moon manquants dans server/UnrankedServer/zone : ${missing.join(', ')}. Importez-les depuis votre BO3 Steam avec Zombies Chronicles.`), { statusCode: 409 });
+      }
       const diskMb = Number(readLabel(info.Config.Labels, 'disk-mb') ?? 0);
       if (diskMb && await directorySize(path.join(this.dataDir, id)) > diskMb * 1024 * 1024) {
         throw Object.assign(new Error(`Quota disque dépassé (${diskMb} Mo).`), { statusCode: 409 });
@@ -549,6 +600,12 @@ export class NodeDocker {
       await new Promise<void>((resolve, reject) => this.docker.modem.followProgress(stream, (err) => err ? reject(err) : resolve()));
     }
   }
+}
+
+async function downloadAsset(url: string) {
+  const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
+  if (!response.ok) throw new Error(`Téléchargement BO3/T7x échoué (${response.status}) : ${url}`);
+  return Buffer.from(await response.arrayBuffer());
 }
 
 export function javaMemoryEnvironment(containerMemoryMb: number) {

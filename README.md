@@ -40,7 +40,7 @@ Padock est un panel d'hébergement de serveurs de jeu inspiré de l'architecture
 - vue des nœuds avec CPU, mémoire et état Docker ;
 - modification des nœuds, vérification des nouvelles connexions d’agent et gestion des allocations libres ;
 - création de serveurs Paper, Vanilla, Purpur, Fabric, Forge et NeoForge ;
-- création de serveurs SteamCMD Rust, Garry's Mod et 7 Days to Die ;
+- création de serveurs SteamCMD Rust, Garry's Mod, 7 Days to Die et BO3 Zombies T7x sur Moon ;
 - téléchargement initial, vérification et mise à jour automatique des fichiers Steam au démarrage ;
 - réservation atomique des plages de ports TCP/UDP nécessaires à chaque jeu ;
 - choix du nœud, de la version, de la RAM et d’une allocation réseau libre appartenant à la plage configurée ;
@@ -134,6 +134,12 @@ PADOCK_GATEWAY_DNS_TARGET=IP_DU_SERVEUR_DOKPLOY
 ```
 
 Ouvrez les ports TCP `80`, `443` et `25565` sur le pare-feu. Le port `2022` est nécessaire uniquement pour le SFTP. Il ne faut pas ouvrir la plage des ports internes Minecraft : lorsque la passerelle est active, l’agent les lie à `127.0.0.1` et seul Gate y accède. Pour un serveur SteamCMD, ouvrez en revanche les allocations externes choisies dans Padock avec les protocoles TCP/UDP affichés dans sa configuration.
+
+### BO3 Zombies : Moon
+
+Dans **Créer un serveur → SteamCMD**, choisissez **Black Ops III Zombies — Moon**. Padock télécharge le serveur dédié Steam (App ID 545990), T7x et sa configuration, puis prépare la rotation `zm_moon`. La première création et le premier démarrage peuvent prendre plusieurs minutes, car le conteneur installe Wine.
+
+Le serveur dédié Steam ne contient pas les fichiers Zombies Chronicles. Depuis votre installation BO3 Steam possédant ce DLC, copiez par SFTP les fichiers indiqués dans `server/UnrankedServer/MOON_FILES_REQUIRED.txt` vers `server/UnrankedServer/zone`. Padock vérifie ces fichiers avant de démarrer. Si `zm_moon.fd` existe dans votre installation, copiez-le aussi. Les joueurs se connectent avec `/connect IP_DU_NOEUD:PORT_EXTERNE` ; le port externe est l’allocation affichée dans Padock, mappée vers UDP 27017 du conteneur.
 
 Dans la modale de création, Padock propose automatiquement un sous-domaine dérivé du nom. Par exemple, `Survie entre amis` devient `survie-entre-amis.mc.example.com`. Gate recharge le routage à chaud lors d’une création, modification ou suppression. Les joueurs utilisent cette adresse sans ajouter de port et aucun enregistrement DNS individuel n’est nécessaire grâce au wildcard.
 

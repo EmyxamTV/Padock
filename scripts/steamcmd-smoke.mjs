@@ -15,6 +15,7 @@ const salt = '0123456789abcdef0123456789abcdef';
 const token = 'padock-steam-node-token-0123456789abcdef';
 let child;
 let createdServer;
+const createdServerIds = new Set();
 const agent = createServer(async (request, response) => {
   const body = await readJson(request);
   response.setHeader('Content-Type', 'application/json');
@@ -28,11 +29,13 @@ const agent = createServer(async (request, response) => {
   }
   if (request.method === 'POST' && request.url === '/v1/servers') {
     createdServer = body;
+    createdServerIds.add(body.id);
     response.writeHead(201).end(JSON.stringify({ dockerId: 'steam-container-test' }));
     return;
   }
   if (request.url?.match(/^\/v1\/servers\/[^/]+\/status$/)) {
-    response.end(JSON.stringify({ status: createdServer ? 'stopped' : 'missing' }));
+    const serverId = request.url.split('/')[3];
+    response.end(JSON.stringify({ status: createdServerIds.has(serverId) ? 'stopped' : 'missing' }));
     return;
   }
   if (request.method === 'PUT' && request.url?.endsWith('/crash-policy')) {
@@ -82,8 +85,9 @@ try {
 
   const catalog = await call('/api/steam/games', { cookie });
   assert.equal(catalog.status, 200);
-  assert.deepEqual(catalog.body.map((game) => game.id), ['rust', 'garrys-mod', '7-days-to-die']);
+  assert.deepEqual(catalog.body.map((game) => game.id), ['bo3-zombies-moon', 'rust', 'garrys-mod', '7-days-to-die']);
   assert.equal(catalog.body.find((game) => game.id === 'rust').recommendedMemoryMb, 12288);
+  assert.deepEqual(catalog.body.find((game) => game.id === 'bo3-zombies-moon').ports, [{ name: 'Jeu', internalPort: 27017, allocationOffset: 0, protocol: 'udp' }]);
 
   const creation = await call('/api/servers', {
     method: 'POST',
@@ -123,6 +127,23 @@ try {
   assert.equal(persistedAllocations.body.find((item) => item.id === 'alloc000').serverId, creation.body.id);
   assert.equal(persistedAllocations.body.find((item) => item.id === 'alloc001').serverId, creation.body.id);
   assert.equal(persistedAllocations.body.find((item) => item.id === 'alloc002').serverId, undefined);
+
+  const moon = await call('/api/servers', {
+    method: 'POST', cookie,
+    body: {
+      name: 'Moon Zombies', platform: 'steamcmd', software: 'STEAMCMD', version: 'latest',
+      steamGameId: 'bo3-zombies-moon', memoryMb: 8192, cpuPercent: 400, diskMb: 30720,
+      nodeId: 'local001', allocationId: 'alloc002',
+    },
+  });
+  assert.equal(moon.status, 202);
+  await waitFor(async () => {
+    const jobs = await call('/api/jobs', { cookie });
+    return jobs.body.find((job) => job.id === moon.body.job.id)?.status === 'completed';
+  }, 5000);
+  assert.equal(createdServer.steam.presetId, 'bo3-zombies-moon');
+  assert.equal(createdServer.steam.appId, 545990);
+  assert.deepEqual(createdServer.ports.map((port) => [port.hostPort, port.internalPort, port.protocol]), [[30002, 27017, 'udp']]);
 
   const invalidRange = await call('/api/servers', {
     method: 'POST',
@@ -177,7 +198,7 @@ async function waitForHealth(selected, processHandle, logs) {
   await waitFor(async () => {
     if (processHandle.exitCode !== null) throw new Error(logs());
     try { return (await fetch(`http://127.0.0.1:${selected}/api/health`)).ok; } catch { return false; }
-  }, 6000);
+  }, 15000).catch((error) => { throw new Error(`${error.message}\n${logs()}`); });
 }
 
 async function waitFor(check, timeoutMs) {

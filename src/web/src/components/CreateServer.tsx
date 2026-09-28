@@ -188,6 +188,7 @@ export function CreateServer({ gateway, servers, nodes, users, busy, submitError
           <div className="picker-head"><div><strong>Jeu à installer avec SteamCMD</strong><small>Mise à jour vérifiée à chaque démarrage</small></div></div>
           <div className="steam-game-grid">{steamGames.map((game) => <button type="button" key={game.id} className={steamGameId === game.id ? 'active' : ''} onClick={() => changeSteamGame(game.id)}><span>◉</span><div><strong>{game.name}</strong><small>App ID {game.appId} · {game.requiredAllocations} port{game.requiredAllocations > 1 ? 's' : ''}</small><p>{game.description}</p></div></button>)}</div>
           {steamGame && <div className="steam-runtime-summary"><div><strong>Réseau du conteneur</strong><span>{steamGame.ports.map((port) => `${port.name} ${port.internalPort}/${port.protocol.toUpperCase()}`).join(' · ')}</span></div><div><strong>Ressources recommandées</strong><span>{formatMegabytes(steamGame.recommendedMemoryMb)} RAM · {formatMegabytes(steamGame.recommendedDiskMb)} disque</span></div></div>}
+          {steamGameId === 'bo3-zombies-moon' && <div className="modpack-warning">Padock installe BO3 dédié, T7x et la configuration Moon. Avant le premier démarrage, importez les fichiers Zombies Chronicles depuis votre copie Steam de BO3 par SFTP dans server/UnrankedServer/zone.</div>}
         </section>
       </>}
 

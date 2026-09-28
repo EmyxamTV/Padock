@@ -20,6 +20,18 @@ export interface SteamGamePreset {
 
 export const steamGames: SteamGamePreset[] = [
   {
+    id: 'bo3-zombies-moon',
+    name: 'Black Ops III Zombies — Moon',
+    description: 'Serveur T7x Zombies Chronicles sur Moon. Les fichiers de la carte doivent être importés depuis une installation Steam possédée.',
+    appId: 545990,
+    startupCommand: 'wine t7x.exe -dedicated +set net_port "$PADOCK_GAME_PORT" +set logfile 2 +exec server_zm.cfg',
+    ports: [
+      { name: 'Jeu', internalPort: 27017, allocationOffset: 0, protocol: 'udp' },
+    ],
+    recommendedMemoryMb: 8192,
+    recommendedDiskMb: 30720,
+  },
+  {
     id: 'rust',
     name: 'Rust',
     description: 'Serveur Rust vanilla avec monde procédural et mise à jour automatique au démarrage.',
